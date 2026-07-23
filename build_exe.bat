@@ -1,0 +1,6 @@
+@echo off
+echo Installing build dependencies...
+pip install pyinstaller pyttsx3 -q
+echo Building AI Reading Studio.exe ...
+pyinstaller --noconfirm AIReadingStudio.spec
+echo Done. See dist\AI Reading Studio.exe

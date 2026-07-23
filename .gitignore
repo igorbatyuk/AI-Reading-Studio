@@ -1,0 +1,97 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.tox/
+.nox/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Test / coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+
+# Secrets / local env
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Cursor (local agent state — not part of the app)
+.cursor/
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# App runtime data (local dev copies)
+*.db
+*.log
+*.db-journal
+
+# PyInstaller extras
+*.manifest
+
+# Large sample books in repo root
+Meyer_*.txt
+
+# Personal test library (large PDFs/TXT — not bundled samples)
+bookss/
+
+# ---------------------------------------------------------------------------
+# TTS workers (tts/*/setup.bat) — venvs, binaries, models, user audio
+# ---------------------------------------------------------------------------
+
+# All worker virtualenvs
+tts/**/.venv/
+
+# Piper — binary + voice models (download via setup.bat / Hugging Face)
+tts/piper/piper/
+tts/piper/_piper/
+tts/piper/_extract/
+tts/piper/*.onnx
+tts/piper/*.onnx.json
+tts/piper/*.dll
+tts/piper/piper.exe
+
+# Kokoro — large model weights (keep models/README.md)
+tts/kokoro/models/*.onnx
+tts/kokoro/models/*.bin
+
+# XTTS — reference speaker clips
+tts/xtts/speakers/*.wav
+tts/xtts/xtts_speakers/*.wav
+
+# Whisper — faster-whisper model cache (if stored locally)
+tts/whisper/models/
+
+# Bergamot — optional local model copies
+tts/bergamot/models/
+
+# StyleTTS2 — cloned upstream + weights
+tts/styletts2/StyleTTS2/
+tts/styletts2/models/
+tts/styletts2/*.pth
