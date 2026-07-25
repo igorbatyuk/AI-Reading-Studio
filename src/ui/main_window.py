@@ -63,6 +63,7 @@ from ..core.tts_engine import TTSEngine
 from ..core.network_status import is_online
 from ..core.update_service import check_github_release
 from ..core.version import APP_NAME, APP_VERSION
+from .book_audio_view import BookAudioView
 from .continue_dialog import ContinueDialog
 from .processing_status_panel import ProcessingStatusPanel
 from .reading_view import ReadingView
@@ -75,7 +76,8 @@ from .tags_dialog import TagsDialog
 class MainWindow(QMainWindow):
     PAGE_READING = 0
     PAGE_LIBRARY = 1
-    PAGE_STATS = 2
+    PAGE_BOOK_AUDIO = 2
+    PAGE_STATS = 3
 
     def __init__(self) -> None:
         super().__init__()
@@ -206,6 +208,7 @@ class MainWindow(QMainWindow):
 
         self.nav_reading = self._make_nav_button("", self.PAGE_READING)
         self.nav_books = self._make_nav_button("", self.PAGE_LIBRARY)
+        self.nav_book_audio = self._make_nav_button("", self.PAGE_BOOK_AUDIO)
         self.nav_stats = self._make_nav_button("", self.PAGE_STATS)
 
         for btn in self._nav_buttons:
@@ -301,6 +304,9 @@ class MainWindow(QMainWindow):
 
         self.stack.addWidget(library_page)
 
+        self.book_audio_view = BookAudioView(self.db, self.tts, self.reading_view)
+        self.stack.addWidget(self.book_audio_view)
+
         self.stats_view = StatsView(self.db)
         self.stack.addWidget(self.stats_view)
 
@@ -393,11 +399,14 @@ class MainWindow(QMainWindow):
 
         if index == self.PAGE_STATS:
             self.stats_view.refresh()
+        if index == self.PAGE_BOOK_AUDIO:
+            self.book_audio_view.refresh()
 
     def _retranslate_ui(self) -> None:
         self.setWindowTitle(f"{tr('app.title')} {APP_VERSION}")
         self.nav_reading.setText(tr("nav.reading"))
         self.nav_books.setText(tr("nav.library"))
+        self.nav_book_audio.setText(tr("nav.book_audio"))
         self.nav_stats.setText(tr("nav.stats"))
         self.add_btn.setText(tr("btn.add_book"))
         self.add_btn.setToolTip(tr("tip.add_book"))
@@ -414,6 +423,7 @@ class MainWindow(QMainWindow):
         self._update_sort_combo_labels()
         self._update_status_bar()
         self.reading_view.retranslate()
+        self.book_audio_view.retranslate()
         self.stats_view.retranslate()
 
     def _apply_theme(self) -> None:
@@ -494,6 +504,10 @@ class MainWindow(QMainWindow):
             settings.get("ollama_model", ""),
         )
         self.reading_view.translator = self.translator
+
+    def apply_speech_rate(self, speed: float) -> None:
+        """Live-update speech rate while Settings dialog is open."""
+        self.reading_view.on_speech_rate_changed(speed)
 
     def _check_continue_reading(self) -> None:
         last_book = self.db.get_last_read_book()
@@ -788,9 +802,12 @@ class MainWindow(QMainWindow):
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.covers.delete_cover(book_id)
+            self.tts.clear_book_cache(book_id)
             self.db.delete_book(book_id)
             if self.reading_view.current_book and self.reading_view.current_book.id == book_id:
                 self.reading_view.current_book = None
+                self.reading_view._book_block_texts = None
+                self.tts.set_reading_book(None)
                 self.reading_view.text_edit.clear()
                 self.reading_view.chapter_label.hide()
                 self.reading_view._update_controls_state()

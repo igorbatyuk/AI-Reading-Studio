@@ -128,8 +128,19 @@ def fetch_premade_voices(
             labels.get("language") or labels.get("accent") or "en"
         ).strip()
         lang_tag = lang.upper()[:2] if lang else "EN"
+        gender_raw = str(labels.get("gender") or "").strip().lower()
+        gender_tag = ""
+        if gender_raw == "female":
+            gender_tag = "Female"
+        elif gender_raw == "male":
+            gender_tag = "Male"
+        elif gender_raw == "neutral":
+            gender_tag = "Neutral"
         if voice_id:
-            voices.append((voice_id, f"{name} ({lang_tag})"))
+            if gender_tag:
+                voices.append((voice_id, f"{name} ({gender_tag}, {lang_tag})"))
+            else:
+                voices.append((voice_id, f"{name} ({lang_tag})"))
 
     if not voices:
         voices = list(PREMADE_VOICES)
@@ -203,15 +214,17 @@ def synthesize_mp3(
         raise RuntimeError("ElevenLabs API key is missing")
 
     voice_id = resolve_voice_id(voice or DEFAULT_VOICE, api_key)
-    from .tts_speed import normalize_ui_speech_rate
+    from .tts_speed import elevenlabs_voice_speed
 
-    speed_value = normalize_ui_speech_rate(speed)
+    speed_value = elevenlabs_voice_speed(speed)
     url = f"{API_BASE}/text-to-speech/{voice_id}"
     payload: dict[str, object] = {
         "text": text,
         "model_id": model_id,
         "voice_settings": {
             "speed": speed_value,
+            "stability": 0.5,
+            "similarity_boost": 0.75,
         },
     }
     language_code = iso_language(lang)

@@ -82,6 +82,7 @@ class ReadingView(QWidget):
         self._highlight_timer.setInterval(33)
         self._highlight_timer.timeout.connect(self._tick_word_highlight)
         self._prefetch_block_index = -1
+        self._book_block_texts: list[str] | None = None
         self._word_highlight_enabled = True
         self._word_tts_enabled = True
         self._word_highlight_style = HIGHLIGHT_STYLE_GRADIENT
@@ -481,6 +482,8 @@ class ReadingView(QWidget):
                 book = fresh
 
         self.current_book = book
+        self._book_block_texts = None
+        self.tts.set_reading_book(book.id)
         self.current_block_index = (
             start_block if start_block is not None else book.current_block
         )
@@ -548,6 +551,8 @@ class ReadingView(QWidget):
             "QTextEdit { padding: 20px 40px 40px 40px; line-height: 1.6; }"
         )
         self._update_reading_layout()
+        voice = settings.get("tts_voice", "en-US-AriaNeural")
+        self.tts.set_voice(voice)
         new_speed = float(settings.get("tts_speed", "1.0"))
         speed_changed = abs(new_speed - self.tts.speed) > 0.001
         self.tts.set_speed(new_speed)
@@ -558,18 +563,34 @@ class ReadingView(QWidget):
         self.tts.set_playback_rate(playback_rate)
         self._highlight_ctrl.set_playback_rate(playback_rate)
         self.speed_btn.setText(self._speed_button_text(playback_rate))
-        if speed_changed and self.current_text.strip():
-            if self.tts.should_prefetch_blocks():
-                self.tts.prefetch(self.current_text)
-            if self.is_playing and not self.is_paused:
-                self.tts.speak(self.current_text)
-        voice = settings.get("tts_voice", "en-US-AriaNeural")
-        self.tts.set_voice(voice)
+        if speed_changed:
+            self._regenerate_current_block_audio()
         if not self._word_highlight_enabled:
             self._clear_word_highlight()
         elif self._highlight_word_index >= 0 or self._highlight_float_index >= 0:
             self._refresh_highlight_from_state()
         self._update_goal_label()
+
+    def on_speech_rate_changed(self, speed: float) -> None:
+        """Apply speech-rate change live (Settings combo or save)."""
+        speed_changed = abs(speed - self.tts.speed) > 0.001
+        self.tts.set_speed(speed)
+        if speed_changed:
+            self._regenerate_current_block_audio()
+
+    def _regenerate_current_block_audio(self) -> None:
+        """Force new TTS at current speech rate (also when paused)."""
+        if not self.current_text.strip():
+            return
+        was_playing = self.is_playing
+        self.tts.stop(emit_finished=False)
+        if self.tts.should_prefetch_blocks():
+            self.tts.prefetch(
+                self.current_text,
+                block_index=self.current_block_index,
+            )
+        if was_playing:
+            self.tts.speak(self.current_text)
 
     def _load_block(self, block_index: int) -> None:
         if not self.current_book:
@@ -587,12 +608,35 @@ class ReadingView(QWidget):
         self._render_text(text)
         self._save_progress()
         self._update_controls_state()
+
+        block_texts = self._book_block_texts_for_current_book()
+        ahead = self.tts.block_prefetch_ahead()
+        self.tts.set_reading_book(self.current_book.id)
+        use_saved = self.db.get_book_use_saved_audio(self.current_book.id)
+        self.tts.set_use_saved_audio(use_saved)
+        self.tts.set_reading_focus(block_index, block_texts, ahead=ahead)
         self._prefetch_block_resources(text, block_index)
+        self.tts.schedule_book_audio_prefetch(block_index, block_texts)
+
+    def _book_block_texts_for_current_book(self) -> list[str]:
+        if not self.current_book:
+            return []
+        if (
+            self._book_block_texts is not None
+            and len(self._book_block_texts) == self.current_book.total_blocks
+        ):
+            return self._book_block_texts
+        texts: list[str] = []
+        for index in range(self.current_book.total_blocks):
+            row = self.db.get_block(self.current_book.id, index)
+            texts.append(row[0] if row else "")
+        self._book_block_texts = texts
+        return texts
 
     def _prefetch_block_resources(self, text: str, block_index: int) -> None:
         self._prefetch_block_index = block_index
         if self.tts.should_prefetch_blocks():
-            self.tts.prefetch(text)
+            self.tts.prefetch(text, block_index=block_index)
         self.translator.prefetch_sentence(text)
         QTimer.singleShot(400, self._prefetch_deferred)
 
@@ -607,13 +651,7 @@ class ReadingView(QWidget):
         if self._word_tts_enabled and self.tts.should_prefetch_words():
             self.tts.prefetch_words(self.current_text)
 
-        from ..core.tts_policy import prefetch_ahead_blocks
-
-        settings = self.db.get_all_settings()
-        ahead = prefetch_ahead_blocks(
-            tts_mode=settings.get("tts_mode", "auto"),
-            offline_engine=settings.get("offline_engine", "system"),
-        )
+        ahead = self.tts.block_prefetch_ahead()
         for offset in range(1, ahead + 1):
             next_index = block_index + offset
             if next_index >= self.current_book.total_blocks:
@@ -623,7 +661,7 @@ class ReadingView(QWidget):
                 break
             next_text = next_block[0]
             if self.tts.should_prefetch_blocks():
-                self.tts.prefetch(next_text)
+                self.tts.prefetch(next_text, block_index=next_index)
             self.translator.prefetch_sentence(next_text)
             if self._word_tts_enabled and self.tts.should_prefetch_words():
                 self.tts.prefetch_words(next_text)

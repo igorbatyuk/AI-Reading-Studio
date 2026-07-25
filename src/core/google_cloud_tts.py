@@ -120,7 +120,7 @@ def synthesize_mp3(
     if "-" not in voice_name:
         voice_name = f"{locale}-Neural2-F"
 
-    from .tts_speed import normalize_ui_speech_rate
+    from .tts_speed import google_speaking_rate
 
     resp = requests.post(
         "https://texttospeech.googleapis.com/v1/text:synthesize",
@@ -130,7 +130,7 @@ def synthesize_mp3(
             "voice": {"languageCode": locale, "name": voice_name},
             "audioConfig": {
                 "audioEncoding": "MP3",
-                "speakingRate": normalize_ui_speech_rate(speed),
+                "speakingRate": google_speaking_rate(speed),
             },
         },
         timeout=timeout,

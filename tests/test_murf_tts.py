@@ -22,6 +22,8 @@ def test_list_voices_fallback():
 
 def test_synthesize_mp3(monkeypatch):
 
+    captured: dict = {}
+
     class FakeResp:
         status_code = 200
 
@@ -36,7 +38,11 @@ def test_synthesize_mp3(monkeypatch):
                 ],
             }
 
-    monkeypatch.setattr(murf_tts.requests, "post", lambda *a, **k: FakeResp())
+    def fake_post(url, headers, json, timeout):
+        captured["json"] = json
+        return FakeResp()
+
+    monkeypatch.setattr(murf_tts.requests, "post", fake_post)
     monkeypatch.setattr(murf_tts, "resolve_voice_id", lambda voice, api_key: voice)
 
     audio, usage, timings = murf_tts.synthesize_mp3(
@@ -49,6 +55,7 @@ def test_synthesize_mp3(monkeypatch):
     assert audio == b"mp3"
     assert usage["remaining"] == 99972
     assert timings == [(0, 400)]
+    assert captured["json"]["rate"] == -50
 
 
 def test_parse_word_durations():
@@ -81,4 +88,5 @@ def test_murf_speech_rate_mapping():
 
     assert murf_speech_rate(1.0) == 0
     assert murf_speech_rate(0.25) == -50
+    assert murf_speech_rate(0.5) == -33
     assert murf_speech_rate(2.0) == 50

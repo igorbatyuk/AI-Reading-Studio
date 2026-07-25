@@ -40,10 +40,11 @@ class Book:
     last_read_at: str | None
     added_at: str
     cover_path: str | None = None
+    use_saved_audio: bool = True
 
 
 class Database:
-    BACKUP_VERSION = 4
+    BACKUP_VERSION = 5
 
     def __init__(self, db_path: Path | None = None) -> None:
         if db_path is None:
@@ -357,6 +358,10 @@ class Database:
         }
         if "cover_path" not in book_cols:
             conn.execute("ALTER TABLE books ADD COLUMN cover_path TEXT DEFAULT ''")
+        if "use_saved_audio" not in book_cols:
+            conn.execute(
+                "ALTER TABLE books ADD COLUMN use_saved_audio INTEGER DEFAULT 1"
+            )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS book_tags (
@@ -441,6 +446,25 @@ class Database:
                 ],
             )
             return book_id
+
+    def set_book_use_saved_audio(self, book_id: int, enabled: bool) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE books SET use_saved_audio = ? WHERE id = ?",
+                (1 if enabled else 0, book_id),
+            )
+
+    def get_book_use_saved_audio(self, book_id: int) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT use_saved_audio FROM books WHERE id = ?", (book_id,)
+            ).fetchone()
+            if not row:
+                return True
+            keys = row.keys()
+            if "use_saved_audio" not in keys:
+                return True
+            return bool(row["use_saved_audio"])
 
     def update_cover_path(self, book_id: int, cover_path: str) -> None:
         with self._connect() as conn:
@@ -535,6 +559,18 @@ class Database:
                 """,
                 (block_index, progress_percent, now, book_id),
             )
+
+    def get_book_block_texts(self, book_id: int) -> list[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT text FROM blocks
+                WHERE book_id = ?
+                ORDER BY block_index
+                """,
+                (book_id,),
+            ).fetchall()
+            return [row["text"] for row in rows]
 
     def get_block(self, book_id: int, block_index: int) -> tuple[str, str] | None:
         with self._connect() as conn:
@@ -1185,6 +1221,7 @@ class Database:
     def _row_to_book(self, row: sqlite3.Row) -> Book:
         keys = row.keys()
         cover = row["cover_path"] if "cover_path" in keys else None
+        use_saved = bool(row["use_saved_audio"]) if "use_saved_audio" in keys else True
         return Book(
             id=row["id"],
             title=row["title"],
@@ -1197,4 +1234,5 @@ class Database:
             last_read_at=row["last_read_at"],
             added_at=row["added_at"],
             cover_path=cover or None,
+            use_saved_audio=use_saved,
         )

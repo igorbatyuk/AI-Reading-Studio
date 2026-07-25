@@ -14,9 +14,9 @@ API_BASE = "https://api.murf.ai"
 DEFAULT_VOICE = "Natalie"
 
 DEFAULT_VOICES: list[tuple[str, str]] = [
-    (DEFAULT_VOICE, "Natalie (EN-US)"),
-    ("Ken", "Ken (EN-US)"),
-    ("Ariana", "Ariana (EN-US)"),
+    (DEFAULT_VOICE, "Natalie (Female, EN-US)"),
+    ("Ken", "Ken (Male, EN-US)"),
+    ("Ariana", "Ariana (Female, EN-US)"),
 ]
 
 _voices_cache: tuple[float, list[tuple[str, str]]] | None = None
@@ -88,8 +88,19 @@ def fetch_voices(
         voice_id = str(item.get("voiceId") or "").strip()
         display = str(item.get("displayName") or voice_id).strip()
         locale = str(item.get("locale") or "en-US").strip()
+        gender_raw = str(
+            item.get("gender") or item.get("voiceGender") or ""
+        ).strip().lower()
+        gender_tag = ""
+        if gender_raw in ("female", "f"):
+            gender_tag = "Female"
+        elif gender_raw in ("male", "m"):
+            gender_tag = "Male"
         if voice_id:
-            voices.append((voice_id, f"{display} ({locale})"))
+            if gender_tag:
+                voices.append((voice_id, f"{display} ({gender_tag}, {locale})"))
+            else:
+                voices.append((voice_id, f"{display} ({locale})"))
 
     if not voices:
         voices = list(DEFAULT_VOICES)
@@ -168,6 +179,8 @@ def synthesize_mp3(
         raise RuntimeError("Murf API key is missing")
 
     voice_id = resolve_voice_id(voice or DEFAULT_VOICE, api_key)
+    rate_value = murf_speech_rate(speed)
+    logger.info("Murf TTS speed ui=%.2f rate=%d", speed, rate_value)
     payload: dict[str, object] = {
         "text": text,
         "voiceId": voice_id,
@@ -176,7 +189,7 @@ def synthesize_mp3(
         "sampleRate": 44100,
         "modelVersion": "GEN2",
         "encodeAsBase64": True,
-        "rate": murf_speech_rate(speed),
+        "rate": rate_value,
         "wordDurationsAsOriginalText": True,
     }
 

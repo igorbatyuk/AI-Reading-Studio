@@ -50,6 +50,12 @@ class _FakeTTS:
             loading_hint="Preparing audio…",
         )
 
+    def list_queue_jobs(self):
+        return []
+
+    def cancel_queued_jobs(self, keys=None):
+        return 0
+
 
 class _FakeTranslator:
     last_error = ""

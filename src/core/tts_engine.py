@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import shutil
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -91,6 +92,16 @@ class TTSEngine(QObject):
         self._audio_cache: dict[str, Path] = {}
         self._word_timings_cache: dict[str, tuple[list[tuple[int, int]], bool]] = {}
         self._prefetch_generation = 0
+        self._reading_book_id: int | None = None
+        self._reading_block_index = -1
+        self._prefetch_ahead = 1
+        self._book_block_texts: list[str] = []
+        self._book_prefetch_generation = 0
+        self._book_prefetch_lock = threading.Lock()
+        self._bulk_generation_generation = 0
+        self._bulk_generation_lock = threading.Lock()
+        self._use_saved_audio = True
+        self._job_meta: dict[str, dict[str, object]] = {}
         self._word_prefetch_by_sentence: dict[int, int] = {}
         self._generating_tasks = 0
         self._cache_key_prefix = ""
@@ -188,8 +199,17 @@ class TTSEngine(QObject):
         return True
 
     def set_speed(self, speed: float) -> None:
-        if speed in self.SPEEDS and speed != self.speed:
+        from .tts_speed import normalize_speech_rate_to_combo
+
+        speed = normalize_speech_rate_to_combo(speed)
+        if speed != self.speed:
+            logger.info("TTS speech rate changed: %.2f -> %.2f", self.speed, speed)
             self.speed = speed
+            self._release_main_player()
+            with self._book_prefetch_lock:
+                self._book_prefetch_generation += 1
+            with self._bulk_generation_lock:
+                self._bulk_generation_generation += 1
             self._clear_cache()
 
     def set_mode(self, mode: str) -> None:
@@ -304,8 +324,213 @@ class TTSEngine(QObject):
         return not self._uses_metered_online(self._word_context())
 
     def should_prefetch_blocks(self) -> bool:
-        """Block prefetch can burn cloud credits when Online → metered engine."""
-        return not self._uses_metered_online(self._main_context())
+        """Prefetch current + next blocks (including metered online APIs)."""
+        return True
+
+    def block_prefetch_ahead(self) -> int:
+        """How many blocks after current to prefetch ahead."""
+        if self._uses_metered_online(self._main_context()):
+            return 1
+        from .tts_policy import prefetch_ahead_blocks
+
+        ctx = self._main_context()
+        return prefetch_ahead_blocks(
+            tts_mode=ctx.tts_mode,
+            offline_engine=ctx.offline_engine,
+        )
+
+    def set_reading_book(self, book_id: int | None) -> None:
+        self._reading_book_id = book_id
+
+    def set_use_saved_audio(self, enabled: bool) -> None:
+        self._use_saved_audio = bool(enabled)
+
+    def use_saved_audio(self) -> bool:
+        return self._use_saved_audio
+
+    def set_reading_focus(
+        self,
+        block_index: int,
+        block_texts: list[str] | None = None,
+        *,
+        ahead: int | None = None,
+    ) -> None:
+        """Move reading cursor; cancel queued prefetch for skipped blocks."""
+        self._reading_block_index = block_index
+        if ahead is not None:
+            self._prefetch_ahead = ahead
+        if block_texts is not None:
+            self._book_block_texts = block_texts
+        self._prefetch_generation += 1
+        if block_texts:
+            with self._jobs_lock:
+                for idx, raw in enumerate(block_texts):
+                    if idx >= block_index:
+                        continue
+                    text = raw.strip()
+                    if not text:
+                        continue
+                    key = self._cache_key(text)
+                    if self._jobs.get(key) == "queued":
+                        self._jobs.pop(key, None)
+        self.activity_changed.emit()
+
+    def clear_book_cache(self, book_id: int) -> int:
+        """Remove on-disk audio cache for one book."""
+        book_dir = self._cache_dir / "books" / str(book_id)
+        if not book_dir.is_dir():
+            return 0
+        removed = sum(
+            1
+            for path in book_dir.iterdir()
+            if path.is_file() and path.suffix in (".mp3", ".wav", ".json")
+        )
+        shutil.rmtree(book_dir, ignore_errors=True)
+        stale = [
+            key
+            for key, path in self._audio_cache.items()
+            if str(book_id) in str(path)
+        ]
+        for key in stale:
+            self._audio_cache.pop(key, None)
+            self._word_timings_cache.pop(key, None)
+        return removed
+
+    def schedule_book_audio_prefetch(
+        self,
+        focus_index: int,
+        block_texts: list[str],
+    ) -> None:
+        """Background fill of book audio cache (forward from focus only)."""
+        if not block_texts or focus_index < 0:
+            return
+        with self._book_prefetch_lock:
+            self._book_prefetch_generation += 1
+            generation = self._book_prefetch_generation
+        threading.Thread(
+            target=self._book_prefetch_worker,
+            args=(focus_index, block_texts, generation),
+            daemon=True,
+        ).start()
+
+    def schedule_full_book_generation(
+        self,
+        book_id: int,
+        block_texts: list[str],
+    ) -> None:
+        """Generate audio for every block in the book (book audio menu)."""
+        if not block_texts:
+            return
+        self.set_reading_book(book_id)
+        with self._bulk_generation_lock:
+            self._bulk_generation_generation += 1
+            generation = self._bulk_generation_generation
+        threading.Thread(
+            target=self._bulk_generation_worker,
+            args=(block_texts, generation),
+            daemon=True,
+        ).start()
+
+    def stop_background_generation(self) -> int:
+        """Cancel queued jobs and stop background book/bulk prefetch workers."""
+        with self._book_prefetch_lock:
+            self._book_prefetch_generation += 1
+        with self._bulk_generation_lock:
+            self._bulk_generation_generation += 1
+        self._prefetch_generation += 1
+        return self.cancel_queued_jobs()
+
+    def list_queue_jobs(self) -> list[dict[str, object]]:
+        with self._jobs_lock:
+            items: list[dict[str, object]] = []
+            for key, state in self._jobs.items():
+                if state not in ("queued", "generating"):
+                    continue
+                meta = self._job_meta.get(key, {})
+                preview = str(meta.get("text") or key[:12])
+                items.append(
+                    {
+                        "key": key,
+                        "state": state,
+                        "text": preview,
+                        "block_index": meta.get("block_index"),
+                        "for_word": bool(meta.get("for_word")),
+                        "error": self._job_errors.get(key, ""),
+                    }
+                )
+            items.sort(
+                key=lambda item: (
+                    0 if item["state"] == "generating" else 1,
+                    item.get("block_index") if item.get("block_index") is not None else 10**9,
+                )
+            )
+            return items
+
+    def cancel_queued_jobs(self, keys: list[str] | None = None) -> int:
+        cancelled = 0
+        with self._jobs_lock:
+            target_keys = keys
+            if target_keys is None:
+                target_keys = [
+                    key for key, state in self._jobs.items() if state == "queued"
+                ]
+            for key in target_keys:
+                if self._jobs.get(key) == "queued":
+                    self._jobs.pop(key, None)
+                    self._job_meta.pop(key, None)
+                    self._job_errors.pop(key, None)
+                    cancelled += 1
+        if cancelled:
+            self.activity_changed.emit()
+        return cancelled
+
+    def book_audio_overview(
+        self,
+        block_texts: list[str],
+    ) -> dict[str, object]:
+        ready = 0
+        queued = 0
+        generating = 0
+        failed = 0
+        blocks: list[dict[str, object]] = []
+        for index, raw in enumerate(block_texts):
+            text = raw.strip()
+            if not text:
+                continue
+            on_disk = self.is_on_disk(text)
+            state, error = self.audio_status(text)
+            if on_disk:
+                ready += 1
+                status = "ready"
+            elif state in ("queued", "generating", "failed"):
+                status = state
+                if state == "queued":
+                    queued += 1
+                elif state == "generating":
+                    generating += 1
+                else:
+                    failed += 1
+            else:
+                status = "missing"
+            blocks.append(
+                {
+                    "index": index,
+                    "text": text,
+                    "status": status,
+                    "error": error,
+                    "on_disk": on_disk,
+                }
+            )
+        total = len(blocks)
+        return {
+            "total": total,
+            "ready": ready,
+            "queued": queued,
+            "generating": generating,
+            "failed": failed,
+            "missing": max(0, total - ready - queued - generating - failed),
+            "blocks": blocks,
+        }
 
     def _uses_metered_online(self, ctx: _TTSContext) -> bool:
         return (
@@ -420,8 +645,10 @@ class TTSEngine(QObject):
         from .tts_voices import parse_stored_voice
 
         engine, raw_voice = parse_stored_voice(ctx.voice)
+        from .tts_speed import speed_cache_token
+
         return (
-            f"{engine}:{raw_voice}:{self.speed}:{ctx.tts_mode}:"
+            f"{engine}:{raw_voice}:{speed_cache_token(self.speed)}:{ctx.tts_mode}:"
             f"{ctx.online_engine}:{ctx.offline_lang}:{ctx.offline_engine}:"
             f"{self.piper_model_path}:{self.styletts2_model_path}:"
             f"{self.azure_speech_region}"
@@ -439,16 +666,34 @@ class TTSEngine(QObject):
     def _cache_digest(self, key: str) -> str:
         return hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
 
-    def _find_cached_file(self, key: str) -> Path | None:
+    def _cache_storage_dir(self, *, for_word: bool = False) -> Path:
+        if for_word or self._reading_book_id is None:
+            path = self._cache_dir / "shared"
+        else:
+            path = self._cache_dir / "books" / str(self._reading_book_id)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _find_cached_file(self, key: str, *, for_word: bool = False) -> Path | None:
         digest = self._cache_digest(key)
-        for ext in (".mp3", ".wav"):
-            path = self._cache_dir / f"{digest}{ext}"
-            if path.exists() and path.stat().st_size > 0:
-                return path
+        dirs: list[Path] = []
+        if not for_word and self._reading_book_id is not None:
+            dirs.append(self._cache_dir / "books" / str(self._reading_book_id))
+        dirs.append(self._cache_dir / "shared")
+        dirs.append(self._cache_dir)
+        for folder in dirs:
+            if not folder.is_dir():
+                continue
+            for ext in (".mp3", ".wav"):
+                path = folder / f"{digest}{ext}"
+                if path.exists() and path.stat().st_size > 0:
+                    return path
         return None
 
-    def _cache_file_path(self, key: str, suffix: str) -> Path:
-        return self._cache_dir / f"{self._cache_digest(key)}{suffix}"
+    def _cache_file_path(self, key: str, suffix: str, *, for_word: bool = False) -> Path:
+        return self._cache_storage_dir(for_word=for_word) / (
+            f"{self._cache_digest(key)}{suffix}"
+        )
 
     def _is_persistent(self, path: Path) -> bool:
         try:
@@ -507,14 +752,33 @@ class TTSEngine(QObject):
             return "queued", ""
         return "waiting", ""
 
-    def _set_job(self, key: str, state: str | None, error: str = "") -> None:
+    def _set_job(
+        self,
+        key: str,
+        state: str | None,
+        error: str = "",
+        *,
+        text: str = "",
+        block_index: int | None = None,
+        for_word: bool = False,
+    ) -> None:
         with self._jobs_lock:
             if state is None:
                 self._jobs.pop(key, None)
                 if not error:
                     self._job_errors.pop(key, None)
+                if not error and state is None:
+                    self._job_meta.pop(key, None)
             else:
                 self._jobs[key] = state
+                if text or block_index is not None or for_word:
+                    meta = self._job_meta.setdefault(key, {})
+                    if text:
+                        meta["text"] = text[:120]
+                    if block_index is not None:
+                        meta["block_index"] = block_index
+                    if for_word:
+                        meta["for_word"] = True
             if error:
                 self._job_errors[key] = error
             elif state != "failed":
@@ -524,10 +788,28 @@ class TTSEngine(QObject):
     def _finish_job(self, key: str) -> None:
         self._set_job(key, None)
 
-    def is_cached(self, text: str, *, for_word: bool = False) -> bool:
+    def is_on_disk(self, text: str, *, for_word: bool = False) -> bool:
         key = self._cache_key(text, for_word=for_word)
-        cached = self._audio_cache.get(key) or self._find_cached_file(key)
+        cached = self._audio_cache.get(key) or self._find_cached_file(
+            key, for_word=for_word
+        )
         return bool(cached and cached.exists())
+
+    def is_cached(self, text: str, *, for_word: bool = False) -> bool:
+        if not for_word and not self._use_saved_audio:
+            return False
+        return self.is_on_disk(text, for_word=for_word)
+
+    def _cache_hit(self, text: str, *, for_word: bool = False) -> Path | None:
+        if not for_word and not self._use_saved_audio:
+            return None
+        key = self._cache_key(text, for_word=for_word)
+        cached = self._audio_cache.get(key) or self._find_cached_file(
+            key, for_word=for_word
+        )
+        if cached and cached.exists():
+            return cached
+        return None
 
     def word_timings_for(self, text: str) -> list[tuple[int, int]] | None:
         """Per-word (start_ms, end_ms) boundaries when available."""
@@ -558,7 +840,7 @@ class TTSEngine(QObject):
         if loaded:
             timings, estimated = loaded
             return WordTimingsBundle(timings, estimated)
-        cached = self._find_cached_file(key)
+        cached = self._find_cached_file(key, for_word=False)
         if cached:
             self._schedule_timings_alignment(text, key, cached)
             duration_ms = media_duration_ms(cached)
@@ -569,8 +851,11 @@ class TTSEngine(QObject):
                 )
         return None
 
-    def _timings_path(self, key: str) -> Path:
-        return self._cache_file_path(key, ".timings.json")
+    def _timings_path(self, key: str, *, for_word: bool = False) -> Path:
+        cached = self._find_cached_file(key, for_word=for_word)
+        if cached:
+            return cached.with_suffix(".timings.json")
+        return self._cache_file_path(key, ".timings.json", for_word=for_word)
 
     def _load_word_timings(self, key: str) -> tuple[list[tuple[int, int]], bool] | None:
         if key in self._word_timings_cache:
@@ -627,9 +912,10 @@ class TTSEngine(QObject):
     def cache_stats(self) -> dict[str, int]:
         disk = 0
         if self._cache_dir.exists():
-            for path in self._cache_dir.iterdir():
-                if path.suffix in (".mp3", ".wav") and path.stat().st_size > 0:
-                    disk += 1
+            for path in self._cache_dir.rglob("*"):
+                if path.is_file() and path.suffix in (".mp3", ".wav"):
+                    if path.stat().st_size > 0:
+                        disk += 1
         return {"memory": len(self._audio_cache), "disk": disk}
 
     def _generating_begin(self) -> None:
@@ -646,8 +932,8 @@ class TTSEngine(QObject):
         self._advance_on_finish = advance
         key = self._cache_key(text)
         self._prepare_speak(key)
-        cached = self._audio_cache.get(key) or self._find_cached_file(key)
-        if cached and cached.exists():
+        cached = self._cache_hit(text, for_word=False)
+        if cached:
             if key != self._active_speak_key:
                 return
             self._audio_cache[key] = cached
@@ -686,7 +972,9 @@ class TTSEngine(QObject):
         if not word:
             return
         key = self._cache_key(word, for_word=True)
-        cached = self._audio_cache.get(key) or self._find_cached_file(key)
+        cached = self._audio_cache.get(key) or self._find_cached_file(
+            key, for_word=True
+        )
         if cached and cached.exists():
             self._audio_cache[key] = cached
             self._word_play_request.emit(str(cached))
@@ -730,20 +1018,37 @@ class TTSEngine(QObject):
                     continue
             self.prefetch(word, for_word=True)
 
-    def prefetch(self, text: str, *, for_word: bool = False) -> None:
+    def prefetch(
+        self,
+        text: str,
+        *,
+        for_word: bool = False,
+        block_index: int | None = None,
+        force: bool = False,
+    ) -> None:
+        if not for_word and not force and block_index is not None:
+            if block_index < self._reading_block_index:
+                return
         key = self._cache_key(text, for_word=for_word)
-        cached = self._audio_cache.get(key) or self._find_cached_file(key)
-        if cached and cached.exists():
+        cached = self._cache_hit(text, for_word=for_word)
+        if cached:
             self._audio_cache[key] = cached
             self._finish_job(key)
             return
         with self._jobs_lock:
             if self._jobs.get(key) in ("queued", "generating"):
                 return
-        self._set_job(key, "queued")
+        self._set_job(
+            key,
+            "queued",
+            text=text,
+            block_index=block_index,
+            for_word=for_word,
+        )
+        generation = self._prefetch_generation
         threading.Thread(
             target=self._prefetch_worker,
-            args=(text, key, for_word),
+            args=(text, key, for_word, generation, block_index),
             daemon=True,
         ).start()
 
@@ -814,14 +1119,23 @@ class TTSEngine(QObject):
             self._schedule_cleanup(current)
 
     def _start_speak_worker(self, text: str, key: str) -> None:
-        self._set_job(key, "queued")
+        self._set_job(key, "queued", text=text)
         self._thread = threading.Thread(
             target=self._speak_worker, args=(text, key), daemon=True
         )
         self._thread.start()
 
-    def _generate_audio(self, text: str, key: str, ctx: _TTSContext) -> Path:
-        existing = self._find_cached_file(key)
+    def _generate_audio(
+        self,
+        text: str,
+        key: str,
+        ctx: _TTSContext,
+        *,
+        for_word: bool = False,
+    ) -> Path:
+        existing = None
+        if for_word or self._use_saved_audio:
+            existing = self._find_cached_file(key, for_word=for_word)
         if existing:
             self._ensure_timings_for_audio(text, key, existing)
             return existing
@@ -829,32 +1143,46 @@ class TTSEngine(QObject):
         self._generating_begin()
         try:
             if ctx.tts_mode == "offline":
-                path = self._generate_offline(text, key, ctx)
+                path = self._generate_offline(text, key, ctx, for_word=for_word)
             elif ctx.tts_mode == "online":
-                path = self._generate_online(text, key, ctx)
+                path = self._generate_online(text, key, ctx, for_word=for_word)
             else:
-                path = self._generate_auto(text, key, ctx)
+                path = self._generate_auto(text, key, ctx, for_word=for_word)
             return self._finalize_generated_audio(text, key, path)
         finally:
             self._generating_end()
 
-    def _generate_online(self, text: str, key: str, ctx: _TTSContext) -> Path:
+    def _generate_online(
+        self,
+        text: str,
+        key: str,
+        ctx: _TTSContext,
+        *,
+        for_word: bool = False,
+    ) -> Path:
         engine = ctx.online_engine or "edge"
         if engine == "azure":
-            return self._generate_azure(text, key, ctx)
+            return self._generate_azure(text, key, ctx, for_word=for_word)
         if engine == "google":
-            return self._generate_google(text, key, ctx)
+            return self._generate_google(text, key, ctx, for_word=for_word)
         if engine == "elevenlabs":
-            return self._generate_elevenlabs(text, key, ctx)
+            return self._generate_elevenlabs(text, key, ctx, for_word=for_word)
         if engine == "cartesia":
-            return self._generate_cartesia(text, key, ctx)
+            return self._generate_cartesia(text, key, ctx, for_word=for_word)
         if engine == "murf":
-            return self._generate_murf(text, key, ctx)
-        return self._generate_edge(text, key, ctx)
+            return self._generate_murf(text, key, ctx, for_word=for_word)
+        return self._generate_edge(text, key, ctx, for_word=for_word)
 
-    def _generate_auto(self, text: str, key: str, ctx: _TTSContext) -> Path:
+    def _generate_auto(
+        self,
+        text: str,
+        key: str,
+        ctx: _TTSContext,
+        *,
+        for_word: bool = False,
+    ) -> Path:
         errors: list[str] = []
-        for provider_name, generator in self._auto_generators(ctx):
+        for provider_name, generator in self._auto_generators(ctx, for_word=for_word):
             try:
                 return generator(text, key)
             except Exception as exc:
@@ -878,29 +1206,46 @@ class TTSEngine(QObject):
             or "character limit" in lower
         )
 
-    def _auto_generators(self, ctx: _TTSContext):
+    def _auto_generators(self, ctx: _TTSContext, *, for_word: bool = False):
+        fw = for_word
         chain: list[tuple[str, object]] = [
-            ("Edge", lambda t, k: self._generate_edge(t, k, ctx))
+            ("Edge", lambda t, k: self._generate_edge(t, k, ctx, for_word=fw))
         ]
         if self.azure_speech_key and self.azure_speech_region:
             chain.append(
-                ("Azure Speech", lambda t, k: self._generate_azure(t, k, ctx))
+                (
+                    "Azure Speech",
+                    lambda t, k: self._generate_azure(t, k, ctx, for_word=fw),
+                )
             )
         if self.google_tts_api_key:
             chain.append(
-                ("Google Cloud", lambda t, k: self._generate_google(t, k, ctx))
+                (
+                    "Google Cloud",
+                    lambda t, k: self._generate_google(t, k, ctx, for_word=fw),
+                )
             )
         if self.elevenlabs_api_key:
             chain.append(
-                ("ElevenLabs", lambda t, k: self._generate_elevenlabs(t, k, ctx))
+                (
+                    "ElevenLabs",
+                    lambda t, k: self._generate_elevenlabs(t, k, ctx, for_word=fw),
+                )
             )
         if self.cartesia_api_key:
             chain.append(
-                ("Cartesia", lambda t, k: self._generate_cartesia(t, k, ctx))
+                (
+                    "Cartesia",
+                    lambda t, k: self._generate_cartesia(t, k, ctx, for_word=fw),
+                )
             )
         if self.murf_api_key:
-            chain.append(("Murf", lambda t, k: self._generate_murf(t, k, ctx)))
-        chain.append(("Offline", lambda t, k: self._generate_offline(t, k, ctx)))
+            chain.append(
+                ("Murf", lambda t, k: self._generate_murf(t, k, ctx, for_word=fw))
+            )
+        chain.append(
+            ("Offline", lambda t, k: self._generate_offline(t, k, ctx, for_word=fw))
+        )
         return chain
 
     _CREDIT_PROVIDERS = frozenset({"ElevenLabs", "Cartesia"})
@@ -928,7 +1273,9 @@ class TTSEngine(QObject):
         if tracker is not None:
             tracker.record(len(text))
 
-    def _generate_edge(self, text: str, key: str, ctx: _TTSContext) -> Path:
+    def _generate_edge(
+        self, text: str, key: str, ctx: _TTSContext, *, for_word: bool = False
+    ) -> Path:
         import edge_tts
 
         from .tts_voices import parse_stored_voice
@@ -936,7 +1283,7 @@ class TTSEngine(QObject):
         _engine, edge_voice = parse_stored_voice(ctx.voice)
         if _engine != "edge":
             edge_voice = "en-US-AriaNeural"
-        out_path = self._cache_file_path(key, ".mp3")
+        out_path = self._cache_file_path(key, ".mp3", for_word=for_word)
         rate = edge_rate_string(self.speed)
         communicate = edge_tts.Communicate(text, edge_voice, rate=rate)
 
@@ -1027,7 +1374,9 @@ class TTSEngine(QObject):
         self._ensure_timings_for_audio(text, key, path)
         return path
 
-    def _generate_azure(self, text: str, key: str, ctx: _TTSContext) -> Path:
+    def _generate_azure(
+        self, text: str, key: str, ctx: _TTSContext, *, for_word: bool = False
+    ) -> Path:
         from . import azure_tts
         from .tts_voices import parse_stored_voice
 
@@ -1035,7 +1384,7 @@ class TTSEngine(QObject):
         _engine, raw_voice = parse_stored_voice(ctx.voice)
         if _engine != "azure":
             raw_voice = azure_tts.default_voice_for_language(ctx.offline_lang)
-        out_path = self._cache_file_path(key, ".mp3")
+        out_path = self._cache_file_path(key, ".mp3", for_word=for_word)
         audio = azure_tts.synthesize_mp3(
             text,
             voice=raw_voice,
@@ -1048,7 +1397,9 @@ class TTSEngine(QObject):
         self._record_cloud_usage(self._azure_tts_usage, text)
         return out_path
 
-    def _generate_google(self, text: str, key: str, ctx: _TTSContext) -> Path:
+    def _generate_google(
+        self, text: str, key: str, ctx: _TTSContext, *, for_word: bool = False
+    ) -> Path:
         from . import google_cloud_tts
         from .tts_voices import parse_stored_voice
 
@@ -1056,7 +1407,7 @@ class TTSEngine(QObject):
         _engine, raw_voice = parse_stored_voice(ctx.voice)
         if _engine != "google":
             raw_voice = google_cloud_tts.default_voice_for_language(ctx.offline_lang)
-        out_path = self._cache_file_path(key, ".mp3")
+        out_path = self._cache_file_path(key, ".mp3", for_word=for_word)
         audio = google_cloud_tts.synthesize_mp3(
             text,
             voice=raw_voice,
@@ -1068,7 +1419,9 @@ class TTSEngine(QObject):
         self._record_cloud_usage(self._google_tts_usage, text)
         return out_path
 
-    def _generate_elevenlabs(self, text: str, key: str, ctx: _TTSContext) -> Path:
+    def _generate_elevenlabs(
+        self, text: str, key: str, ctx: _TTSContext, *, for_word: bool = False
+    ) -> Path:
         from . import elevenlabs_tts
         from .tts_voices import parse_stored_voice
 
@@ -1079,7 +1432,7 @@ class TTSEngine(QObject):
         raw_voice = elevenlabs_tts.resolve_voice_id(
             raw_voice, self.elevenlabs_api_key
         )
-        out_path = self._cache_file_path(key, ".mp3")
+        out_path = self._cache_file_path(key, ".mp3", for_word=for_word)
         audio = elevenlabs_tts.synthesize_mp3(
             text,
             voice=raw_voice,
@@ -1091,7 +1444,9 @@ class TTSEngine(QObject):
         self._record_cloud_usage(self._elevenlabs_tts_usage, text)
         return out_path
 
-    def _generate_cartesia(self, text: str, key: str, ctx: _TTSContext) -> Path:
+    def _generate_cartesia(
+        self, text: str, key: str, ctx: _TTSContext, *, for_word: bool = False
+    ) -> Path:
         from . import cartesia_tts
         from .tts_voices import parse_stored_voice
 
@@ -1102,7 +1457,7 @@ class TTSEngine(QObject):
         raw_voice = cartesia_tts.resolve_voice_id(
             raw_voice, self.cartesia_api_key
         )
-        out_path = self._cache_file_path(key, ".mp3")
+        out_path = self._cache_file_path(key, ".mp3", for_word=for_word)
         audio = cartesia_tts.synthesize_mp3(
             text,
             voice=raw_voice,
@@ -1114,7 +1469,9 @@ class TTSEngine(QObject):
         self._record_cloud_usage(self._cartesia_tts_usage, text)
         return out_path
 
-    def _generate_murf(self, text: str, key: str, ctx: _TTSContext) -> Path:
+    def _generate_murf(
+        self, text: str, key: str, ctx: _TTSContext, *, for_word: bool = False
+    ) -> Path:
         from . import murf_tts
         from .tts_voices import parse_stored_voice
 
@@ -1123,7 +1480,7 @@ class TTSEngine(QObject):
         if _engine != "murf":
             raw_voice = murf_tts.default_voice_for_language(ctx.offline_lang)
         raw_voice = murf_tts.resolve_voice_id(raw_voice, self.murf_api_key)
-        out_path = self._cache_file_path(key, ".mp3")
+        out_path = self._cache_file_path(key, ".mp3", for_word=for_word)
         audio, usage, word_timings = murf_tts.synthesize_mp3(
             text,
             voice=raw_voice,
@@ -1146,7 +1503,9 @@ class TTSEngine(QObject):
             self._murf_tts_usage.record(len(text))
         return out_path
 
-    def _generate_offline(self, text: str, key: str, ctx: _TTSContext) -> Path:
+    def _generate_offline(
+        self, text: str, key: str, ctx: _TTSContext, *, for_word: bool = False
+    ) -> Path:
         from .tts_voices import parse_stored_voice
 
         engine, raw_voice = parse_stored_voice(ctx.voice)
@@ -1157,24 +1516,28 @@ class TTSEngine(QObject):
                 text,
                 key,
                 raw_voice if engine == "styletts2" else None,
+                for_word=for_word,
             )
         if active == "xtts":
             return self._generate_xtts(
                 text,
                 key,
                 raw_voice if engine == "xtts" else None,
+                for_word=for_word,
             )
         if active == "kokoro":
             return self._generate_kokoro(
                 text,
                 key,
                 raw_voice if engine == "kokoro" else None,
+                for_word=for_word,
             )
         if active == "piper":
             return self._generate_piper(
                 text,
                 key,
                 raw_voice if engine == "piper" else None,
+                for_word=for_word,
             )
 
         from . import offline_tts
@@ -1183,19 +1546,24 @@ class TTSEngine(QObject):
             raise RuntimeError(
                 "Offline TTS unavailable. Install pyttsx3 or configure Piper/Kokoro/XTTS/StyleTTS2."
             )
-        out_path = self._cache_file_path(key, ".wav")
+        out_path = self._cache_file_path(key, ".wav", for_word=for_word)
         return offline_tts.generate_wav(
             text, ctx.offline_lang, self.speed, out_path=out_path
         )
 
     def _generate_kokoro(
-        self, text: str, key: str, voice: str | None = None
+        self,
+        text: str,
+        key: str,
+        voice: str | None = None,
+        *,
+        for_word: bool = False,
     ) -> Path:
         from . import kokoro_tts
 
         if not kokoro_tts.is_available(self.app_dir):
             raise RuntimeError("Kokoro not configured")
-        out_path = self._cache_file_path(key, ".wav")
+        out_path = self._cache_file_path(key, ".wav", for_word=for_word)
         return kokoro_tts.generate_wav(
             text,
             voice or kokoro_tts.DEFAULT_KOKORO_VOICE,
@@ -1206,7 +1574,12 @@ class TTSEngine(QObject):
         )
 
     def _generate_piper(
-        self, text: str, key: str, voice: str | None = None
+        self,
+        text: str,
+        key: str,
+        voice: str | None = None,
+        *,
+        for_word: bool = False,
     ) -> Path:
         from . import piper_tts
 
@@ -1214,7 +1587,7 @@ class TTSEngine(QObject):
             self.offline_lang, self.piper_model_path, self.app_dir
         ):
             raise RuntimeError("Piper not configured")
-        out_path = self._cache_file_path(key, ".wav")
+        out_path = self._cache_file_path(key, ".wav", for_word=for_word)
         return piper_tts.generate_wav(
             text,
             self.offline_lang,
@@ -1226,13 +1599,18 @@ class TTSEngine(QObject):
         )
 
     def _generate_xtts(
-        self, text: str, key: str, voice: str | None = None
+        self,
+        text: str,
+        key: str,
+        voice: str | None = None,
+        *,
+        for_word: bool = False,
     ) -> Path:
         from . import xtts_tts
 
         if not xtts_tts.is_available(self.app_dir):
             raise RuntimeError("XTTS not configured")
-        out_path = self._cache_file_path(key, ".wav")
+        out_path = self._cache_file_path(key, ".wav", for_word=for_word)
         return xtts_tts.generate_wav(
             text,
             voice or xtts_tts.DEFAULT_SPEAKER,
@@ -1243,13 +1621,18 @@ class TTSEngine(QObject):
         )
 
     def _generate_styletts2(
-        self, text: str, key: str, voice: str | None = None
+        self,
+        text: str,
+        key: str,
+        voice: str | None = None,
+        *,
+        for_word: bool = False,
     ) -> Path:
         from . import styletts2_tts
 
         if not styletts2_tts.is_available(self.app_dir, self.styletts2_model_path):
             raise RuntimeError("StyleTTS2 not configured")
-        out_path = self._cache_file_path(key, ".wav")
+        out_path = self._cache_file_path(key, ".wav", for_word=for_word)
         return styletts2_tts.generate_wav(
             text,
             voice or styletts2_tts.DEFAULT_MODEL,
@@ -1264,9 +1647,9 @@ class TTSEngine(QObject):
         tmp_path: Path | None = None
         ctx = self._main_context()
         key = self._cache_key(text)
-        self._set_job(key, "generating")
+        self._set_job(key, "generating", text=text)
         try:
-            tmp_path = self._generate_audio(text, key, ctx)
+            tmp_path = self._generate_audio(text, key, ctx, for_word=False)
             if self._stop_event.is_set() or speak_key != self._active_speak_key:
                 if tmp_path and not self._is_persistent(tmp_path):
                     self._schedule_cleanup(tmp_path)
@@ -1289,20 +1672,50 @@ class TTSEngine(QObject):
             else:
                 self._set_job(key, None)
 
-    def _prefetch_worker(self, text: str, key: str, for_word: bool) -> None:
+    def _prefetch_worker(
+        self,
+        text: str,
+        key: str,
+        for_word: bool,
+        generation: int,
+        block_index: int | None,
+    ) -> None:
+        if not for_word:
+            if generation != self._prefetch_generation:
+                self._set_job(key, None)
+                return
+            if block_index is not None and block_index < self._reading_block_index:
+                self._set_job(key, None)
+                return
         if key in self._audio_cache and self._audio_cache[key].exists():
             self._finish_job(key)
             return
-        cached = self._find_cached_file(key)
+        cached = self._cache_hit(text, for_word=for_word)
         if cached:
             self._audio_cache[key] = cached
             self._finish_job(key)
             self.activity_changed.emit()
             return
-        self._set_job(key, "generating")
+        self._set_job(
+            key,
+            "generating",
+            text=text,
+            block_index=block_index,
+            for_word=for_word,
+        )
         ctx = self._word_context() if for_word else self._main_context()
         try:
-            path = self._generate_audio(text, key, ctx)
+            path = self._generate_audio(text, key, ctx, for_word=for_word)
+            if not for_word and (
+                generation != self._prefetch_generation
+                or (
+                    block_index is not None
+                    and block_index < self._reading_block_index
+                )
+            ):
+                self._audio_cache[key] = path
+                self._set_job(key, None)
+                return
             self._audio_cache[key] = path
             self._finish_job(key)
         except Exception as exc:
@@ -1310,18 +1723,94 @@ class TTSEngine(QObject):
             self._last_error = str(exc)
             self._set_job(key, "failed", str(exc))
 
+    def _book_prefetch_worker(
+        self,
+        focus_index: int,
+        block_texts: list[str],
+        generation: int,
+    ) -> None:
+        """Sequentially cache all blocks from focus forward (no backlog behind cursor)."""
+        ahead = self.block_prefetch_ahead()
+        priority: list[int] = []
+        for offset in range(0, ahead + 1):
+            idx = focus_index + offset
+            if idx < len(block_texts):
+                priority.append(idx)
+        for idx in range(focus_index, len(block_texts)):
+            if idx not in priority:
+                priority.append(idx)
+
+        for index in priority:
+            if generation != self._book_prefetch_generation:
+                return
+            if index < self._reading_block_index:
+                continue
+            text = block_texts[index].strip()
+            if not text:
+                continue
+            if self.is_cached(text):
+                continue
+            key = self._cache_key(text)
+            with self._jobs_lock:
+                state = self._jobs.get(key, "")
+            if state == "generating":
+                continue
+            self.prefetch(text, block_index=index)
+            # One block at a time in this worker — wait until job finishes or fails.
+            for _ in range(600):
+                if generation != self._book_prefetch_generation:
+                    return
+                if index < self._reading_block_index:
+                    break
+                with self._jobs_lock:
+                    state = self._jobs.get(key, "")
+                if state in ("", "failed") or self.is_cached(text):
+                    break
+                threading.Event().wait(0.5)
+
+    def _bulk_generation_worker(
+        self,
+        block_texts: list[str],
+        generation: int,
+    ) -> None:
+        """Generate audio for every block (book audio menu)."""
+        for index, raw in enumerate(block_texts):
+            if generation != self._bulk_generation_generation:
+                return
+            text = raw.strip()
+            if not text:
+                continue
+            if self.is_on_disk(text):
+                continue
+            key = self._cache_key(text)
+            with self._jobs_lock:
+                state = self._jobs.get(key, "")
+            if state == "generating":
+                continue
+            self.prefetch(text, block_index=index, force=True)
+            for _ in range(600):
+                if generation != self._bulk_generation_generation:
+                    return
+                with self._jobs_lock:
+                    state = self._jobs.get(key, "")
+                if state in ("", "failed") or self.is_on_disk(text):
+                    break
+                threading.Event().wait(0.5)
+
     def _word_speak_worker(self, word: str) -> None:
         tmp_path: Path | None = None
         ctx = self._word_context()
         key = self._cache_key(word, for_word=True)
         try:
-            cached = self._audio_cache.get(key) or self._find_cached_file(key)
+            cached = self._audio_cache.get(key) or self._find_cached_file(
+                key, for_word=True
+            )
             if cached and cached.exists():
                 self._audio_cache[key] = cached
                 self._word_play_request.emit(str(cached))
                 return
             self._set_job(key, "generating")
-            tmp_path = self._generate_audio(word, key, ctx)
+            tmp_path = self._generate_audio(word, key, ctx, for_word=True)
             if tmp_path:
                 self._audio_cache[key] = tmp_path
                 self._finish_job(key)

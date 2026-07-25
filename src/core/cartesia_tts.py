@@ -16,7 +16,7 @@ DEFAULT_VOICE = "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4"  # Skylar — Friendly Gu
 
 # Public voices from Cartesia voice library (fallback without API key).
 DEFAULT_VOICES: list[tuple[str, str]] = [
-    (DEFAULT_VOICE, "Skylar — Friendly Guide (EN)"),
+    (DEFAULT_VOICE, "Skylar — Friendly Guide (Female, EN)"),
     ("f786b574-daa5-4673-aa0c-cbe3e8534c02", "Sonic default (EN)"),
 ]
 
@@ -97,8 +97,17 @@ def fetch_voices(
             voice_id = str(item.get("id") or "").strip()
             name = str(item.get("name") or voice_id).strip()
             language = str(item.get("language") or "en").strip().upper()
+            gender_raw = str(item.get("gender") or "").strip().lower()
+            gender_tag = ""
+            if gender_raw in ("female", "f", "woman"):
+                gender_tag = "Female"
+            elif gender_raw in ("male", "m", "man"):
+                gender_tag = "Male"
             if voice_id:
-                voices.append((voice_id, f"{name} ({language})"))
+                if gender_tag:
+                    voices.append((voice_id, f"{name} ({gender_tag}, {language})"))
+                else:
+                    voices.append((voice_id, f"{name} ({language})"))
         if not payload.get("has_more"):
             break
         starting_after = str(payload.get("next_page") or "").strip() or None
@@ -168,6 +177,12 @@ def synthesize_mp3(
         raise RuntimeError("Cartesia API key is missing")
 
     voice_id = resolve_voice_id(voice or DEFAULT_VOICE, api_key)
+    speed_value = cartesia_generation_speed(speed)
+    logger.info(
+        "Cartesia TTS speed ui=%.2f api=%.2f",
+        speed,
+        speed_value,
+    )
     payload: dict[str, object] = {
         "model_id": model_id,
         "transcript": text,
@@ -178,7 +193,7 @@ def synthesize_mp3(
             "bit_rate": 128000,
         },
         "generation_config": {
-            "speed": cartesia_generation_speed(speed),
+            "speed": speed_value,
         },
     }
     language = iso_language(lang)

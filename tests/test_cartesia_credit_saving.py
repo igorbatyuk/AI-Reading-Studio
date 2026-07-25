@@ -9,7 +9,8 @@ def test_cartesia_skips_word_prefetch(qapp):
     tts.set_online_engine("cartesia")
     tts.set_cartesia_api_key("sk_car_test")
     assert tts.should_prefetch_words() is False
-    assert tts.should_prefetch_blocks() is False
+    assert tts.should_prefetch_blocks() is True
+    assert tts.block_prefetch_ahead() == 1
 
 
 def test_cartesia_auto_allows_block_prefetch(qapp):

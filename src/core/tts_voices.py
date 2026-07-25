@@ -474,31 +474,44 @@ def get_voices_for_tts_context(
     elevenlabs_api_key: str = "",
     cartesia_api_key: str = "",
     murf_api_key: str = "",
+    voice_sort_prefs: "VoiceSortPrefs | None" = None,
+    skip_sort: bool = False,
 ) -> list[tuple[str, str]]:
+    from .tts_voice_ranking import sort_voices_for_reading
+    from .voice_sort_prefs import VoiceSortPrefs
+    from .voice_gender import apply_gender_labels
+
     engine = active_tts_engine(tts_mode, offline_engine, online_engine)
     if engine == "edge":
-        return _edge_voices_prefixed(lang_code)
-    if engine == "azure":
-        return _azure_voices(lang_code)
-    if engine == "google":
-        return _google_tts_voices(lang_code)
-    if engine == "elevenlabs":
-        return _elevenlabs_voices(lang_code, elevenlabs_api_key)
-    if engine == "cartesia":
-        return _cartesia_voices(lang_code, cartesia_api_key)
-    if engine == "murf":
-        return _murf_voices(lang_code, murf_api_key)
-    if engine == "system":
-        return _system_voices(lang_code)
-    if engine == "piper":
-        return _piper_voices(lang_code, app_dir, piper_model_path)
-    if engine == "kokoro":
-        return _kokoro_voices(lang_code)
-    if engine == "xtts":
-        return _xtts_voices(lang_code, app_dir)
-    if engine == "styletts2":
-        return _styletts2_voices(lang_code, app_dir, styletts2_model_path)
-    return _edge_voices_prefixed(lang_code)
+        voices = _edge_voices_prefixed(lang_code)
+    elif engine == "azure":
+        voices = _azure_voices(lang_code)
+    elif engine == "google":
+        voices = _google_tts_voices(lang_code)
+    elif engine == "elevenlabs":
+        voices = _elevenlabs_voices(lang_code, elevenlabs_api_key)
+    elif engine == "cartesia":
+        voices = _cartesia_voices(lang_code, cartesia_api_key)
+    elif engine == "murf":
+        voices = _murf_voices(lang_code, murf_api_key)
+    elif engine == "system":
+        voices = _system_voices(lang_code)
+    elif engine == "piper":
+        voices = _piper_voices(lang_code, app_dir, piper_model_path)
+    elif engine == "kokoro":
+        voices = _kokoro_voices(lang_code)
+    elif engine == "xtts":
+        voices = _xtts_voices(lang_code, app_dir)
+    elif engine == "styletts2":
+        voices = _styletts2_voices(lang_code, app_dir, styletts2_model_path)
+    else:
+        voices = _edge_voices_prefixed(lang_code)
+    if skip_sort:
+        return apply_gender_labels(voices)
+    prefs = voice_sort_prefs if voice_sort_prefs is not None else VoiceSortPrefs()
+    return sort_voices_for_reading(
+        apply_gender_labels(voices), lang_code, engine, prefs
+    )
 
 
 def default_voice_for_tts_context(
@@ -513,6 +526,7 @@ def default_voice_for_tts_context(
     elevenlabs_api_key: str = "",
     cartesia_api_key: str = "",
     murf_api_key: str = "",
+    voice_sort_prefs: "VoiceSortPrefs | None" = None,
 ) -> str:
     voices = get_voices_for_tts_context(
         lang_code,
@@ -525,6 +539,7 @@ def default_voice_for_tts_context(
         elevenlabs_api_key=elevenlabs_api_key,
         cartesia_api_key=cartesia_api_key,
         murf_api_key=murf_api_key,
+        voice_sort_prefs=voice_sort_prefs,
     )
     if voices:
         return voices[0][0]
@@ -544,6 +559,7 @@ def is_voice_valid_for_tts_context(
     elevenlabs_api_key: str = "",
     cartesia_api_key: str = "",
     murf_api_key: str = "",
+    voice_sort_prefs: "VoiceSortPrefs | None" = None,
 ) -> bool:
     engine, _raw = parse_stored_voice(voice_id)
     expected = active_tts_engine(tts_mode, offline_engine, online_engine)
@@ -562,6 +578,7 @@ def is_voice_valid_for_tts_context(
             elevenlabs_api_key=elevenlabs_api_key,
             cartesia_api_key=cartesia_api_key,
             murf_api_key=murf_api_key,
+            voice_sort_prefs=voice_sort_prefs,
         )
     }
     return voice_id in valid_ids

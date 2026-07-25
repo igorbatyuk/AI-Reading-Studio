@@ -75,6 +75,13 @@ class ProcessingStatusPanel(QDialog):
             tr("status.panel.network")
         )
         self.audio_card, self.audio_body = self._make_card(tr("status.panel.tts"))
+        self.queue_card, self.queue_body = self._make_card(tr("status.panel.queue"))
+        self.queue_cancel_btn = QPushButton(tr("status.panel.queue_cancel_all"))
+        self.queue_cancel_btn.setObjectName("secondaryBtn")
+        self.queue_cancel_btn.clicked.connect(self._cancel_all_queued)
+        self.queue_body.addWidget(self.queue_cancel_btn)
+        self.queue_list_host = QVBoxLayout()
+        self.queue_body.addLayout(self.queue_list_host)
         self.translation_card, self.translation_body = self._make_card(
             tr("status.panel.translation")
         )
@@ -219,6 +226,8 @@ class ProcessingStatusPanel(QDialog):
             ),
         )
 
+        self._refresh_queue_section()
+
         self._clear_layout(self.translation_body)
         self._add_row(
             self.translation_body,
@@ -299,6 +308,65 @@ class ProcessingStatusPanel(QDialog):
             self.error_label.show()
         else:
             self.error_label.hide()
+
+    def _cancel_all_queued(self) -> None:
+        self.tracker.tts.cancel_queued_jobs()
+        self.refresh()
+
+    def _cancel_job(self, key: str) -> None:
+        self.tracker.tts.cancel_queued_jobs([key])
+        self.refresh()
+
+    def _refresh_queue_section(self) -> None:
+        self._clear_layout(self.queue_list_host)
+        jobs = self.tracker.tts.list_queue_jobs()
+        if not jobs:
+            self.queue_card.show()
+            self._add_row(
+                self.queue_list_host,
+                tr("status.panel.queue_items"),
+                tr("status.panel.idle"),
+            )
+            self.queue_cancel_btn.setEnabled(False)
+            return
+        self.queue_cancel_btn.setEnabled(
+            any(item["state"] == "queued" for item in jobs)
+        )
+        for item in jobs[:20]:
+            preview = str(item.get("text") or "")
+            block_index = item.get("block_index")
+            if block_index is not None:
+                label = tr(
+                    "status.panel.queue_block",
+                    n=int(block_index) + 1,
+                    preview=preview[:60],
+                )
+            else:
+                label = preview[:80] or str(item.get("key", ""))[:12]
+            state = str(item.get("state", ""))
+            row = QHBoxLayout()
+            name = QLabel(label)
+            name.setObjectName("statusRowLabel")
+            name.setWordWrap(True)
+            status = QLabel(self._state_label(state))
+            status.setObjectName(self._state_object_name(state))
+            row.addWidget(name, stretch=1)
+            cancel_btn = QPushButton(tr("status.panel.queue_cancel"))
+            cancel_btn.setObjectName("secondaryBtn")
+            cancel_btn.setFixedWidth(72)
+            key = str(item.get("key", ""))
+            if state != "queued":
+                cancel_btn.setEnabled(False)
+            cancel_btn.clicked.connect(
+                lambda checked=False, job_key=key: self._cancel_job(job_key)
+            )
+            row.addWidget(status)
+            row.addWidget(cancel_btn)
+            self.queue_list_host.addLayout(row)
+        if len(jobs) > 20:
+            extra = QLabel(tr("status.panel.queue_more", n=len(jobs) - 20))
+            extra.setObjectName("hintLabel")
+            self.queue_list_host.addWidget(extra)
 
     @staticmethod
     def _clear_layout(layout: QVBoxLayout) -> None:

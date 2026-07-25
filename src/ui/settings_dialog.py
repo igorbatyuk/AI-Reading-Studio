@@ -7,6 +7,8 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QCheckBox,
     QColorDialog,
     QComboBox,
     QDialog,
@@ -16,6 +18,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -51,6 +55,7 @@ from ..core.secrets import (
     get_google_tts_api_key,
 )
 from ..core.tts_voices import (
+    active_tts_engine,
     default_voice_for_tts_context,
     format_stored_voice,
     get_languages,
@@ -58,6 +63,20 @@ from ..core.tts_voices import (
     is_voice_valid_for_tts_context,
     language_for_stored_voice,
     voice_preview_sample,
+)
+from ..core.voice_sort_prefs import (
+    GENDER_FEMALE,
+    GENDER_MALE,
+    GENDER_MIX,
+    PRESET_BOOK,
+    PRESET_CUSTOM,
+    PRESET_FAST,
+    PRESET_NEWS,
+    REGION_ANY,
+    REGION_AU,
+    REGION_UK,
+    REGION_US,
+    VoiceSortPrefs,
 )
 from ..core.tts_engine import TTSEngine
 from ..core.tts_policy import is_slow_offline_engine, recommended_block_words
@@ -88,10 +107,10 @@ class SettingsDialog(QDialog):
         if value in SettingsDialog.TRANSLATION_ENGINES:
             return value
         return "auto"
-    MIN_WIDTH = 580
-    MIN_HEIGHT = 520
-    PREFERRED_WIDTH = 640
-    PREFERRED_HEIGHT = 680
+    MIN_WIDTH = 720
+    MIN_HEIGHT = 560
+    PREFERRED_WIDTH = 900
+    PREFERRED_HEIGHT = 740
 
     def __init__(self, db: Database, parent=None) -> None:
         super().__init__(parent)
@@ -476,22 +495,9 @@ class SettingsDialog(QDialog):
         audio_form = self._form_layout(audio_tab)
 
         self.speed_combo = QComboBox()
-        for speed in TTSEngine.SPEEDS:
-            self.speed_combo.addItem(f"{speed}x", speed)
-        current_speed = float(settings.get("tts_speed", "1.0"))
-        idx = (
-            list(TTSEngine.SPEEDS.keys()).index(current_speed)
-            if current_speed in TTSEngine.SPEEDS
-            else list(TTSEngine.SPEEDS.keys()).index(1.0)
-        )
-        self.speed_combo.setCurrentIndex(idx)
         self._wide_combo(self.speed_combo)
         self.speed_combo.currentIndexChanged.connect(self._on_speech_speed_changed)
         audio_form.addRow(tr("settings.voice_speed"), self.speed_combo)
-        speed_hint = QLabel(tr("settings.voice_speed_hint"))
-        speed_hint.setWordWrap(True)
-        speed_hint.setStyleSheet("color: #666; font-size: 12px;")
-        audio_form.addRow("", speed_hint)
 
         voice_row = QHBoxLayout()
         self.voice_combo = QComboBox()
@@ -507,6 +513,11 @@ class SettingsDialog(QDialog):
 
         preview_hint = self._hint_label(tr("settings.voice_preview_hint"))
         audio_form.addRow("", preview_hint)
+        voice_sort_hint = self._hint_label(tr("settings.voice_sort_hint"))
+        audio_form.addRow("", voice_sort_hint)
+
+        self._voice_sort_prefs_loaded = VoiceSortPrefs.from_settings(settings)
+        self._voice_sort_custom_order_draft = dict(self._voice_sort_prefs_loaded.custom_order)
 
         self.tts_mode_combo = QComboBox()
         self._wide_combo(self.tts_mode_combo)
@@ -710,11 +721,119 @@ class SettingsDialog(QDialog):
 
         self._refresh_voices(self._stored_tts_voice)
         self._refresh_word_voices(self._stored_word_tts_voice)
+        self._refresh_speed_combo()
         self._update_offline_engine_fields()
         self._update_word_tts_fields()
         self._update_offline_block_hint()
 
         tabs.addTab(self._scroll_tab(audio_tab), tr("settings.tab.audio"))
+
+        voice_prefs_tab = QWidget()
+        voice_prefs_form = self._form_layout(voice_prefs_tab)
+
+        voice_prefs_intro = self._hint_label(tr("settings.voice_prefs.intro"))
+        voice_prefs_form.addRow("", voice_prefs_intro)
+
+        self.voice_sort_preset_combo = QComboBox()
+        self._wide_combo(self.voice_sort_preset_combo)
+        for preset, label_key in (
+            (PRESET_BOOK, "settings.voice_prefs.preset.book"),
+            (PRESET_NEWS, "settings.voice_prefs.preset.news"),
+            (PRESET_FAST, "settings.voice_prefs.preset.fast"),
+            (PRESET_CUSTOM, "settings.voice_prefs.preset.custom"),
+        ):
+            self.voice_sort_preset_combo.addItem(tr(label_key), preset)
+        for i in range(self.voice_sort_preset_combo.count()):
+            if self.voice_sort_preset_combo.itemData(i) == self._voice_sort_prefs_loaded.preset:
+                self.voice_sort_preset_combo.setCurrentIndex(i)
+                break
+        self.voice_sort_preset_combo.currentIndexChanged.connect(
+            self._on_voice_sort_preset_changed
+        )
+        voice_prefs_form.addRow(
+            tr("settings.voice_prefs.preset"), self.voice_sort_preset_combo
+        )
+
+        self.voice_gender_pref_combo = QComboBox()
+        self._wide_combo(self.voice_gender_pref_combo)
+        for gender, label_key in (
+            (GENDER_FEMALE, "settings.voice_prefs.gender.female"),
+            (GENDER_MALE, "settings.voice_prefs.gender.male"),
+            (GENDER_MIX, "settings.voice_prefs.gender.mix"),
+        ):
+            self.voice_gender_pref_combo.addItem(tr(label_key), gender)
+        for i in range(self.voice_gender_pref_combo.count()):
+            if self.voice_gender_pref_combo.itemData(i) == self._voice_sort_prefs_loaded.gender_pref:
+                self.voice_gender_pref_combo.setCurrentIndex(i)
+                break
+        self.voice_gender_pref_combo.currentIndexChanged.connect(
+            self._on_voice_sort_pref_changed
+        )
+        voice_prefs_form.addRow(
+            tr("settings.voice_prefs.gender"), self.voice_gender_pref_combo
+        )
+
+        self.voice_region_pref_combo = QComboBox()
+        self._wide_combo(self.voice_region_pref_combo)
+        for region, label_key in (
+            (REGION_US, "settings.voice_prefs.region.us"),
+            (REGION_UK, "settings.voice_prefs.region.uk"),
+            (REGION_AU, "settings.voice_prefs.region.au"),
+            (REGION_ANY, "settings.voice_prefs.region.any"),
+        ):
+            self.voice_region_pref_combo.addItem(tr(label_key), region)
+        for i in range(self.voice_region_pref_combo.count()):
+            if (
+                self.voice_region_pref_combo.itemData(i)
+                == self._voice_sort_prefs_loaded.region_pref
+            ):
+                self.voice_region_pref_combo.setCurrentIndex(i)
+                break
+        self.voice_region_pref_combo.currentIndexChanged.connect(
+            self._on_voice_sort_pref_changed
+        )
+        self.voice_region_pref_label = QLabel(tr("settings.voice_prefs.region"))
+        voice_prefs_form.addRow(
+            self.voice_region_pref_label, self.voice_region_pref_combo
+        )
+
+        self.voice_hide_unsuitable_check = QCheckBox(
+            tr("settings.voice_prefs.hide_unsuitable")
+        )
+        self.voice_hide_unsuitable_check.setChecked(
+            self._voice_sort_prefs_loaded.hide_unsuitable
+        )
+        self.voice_hide_unsuitable_check.toggled.connect(
+            self._on_voice_sort_pref_changed
+        )
+        voice_prefs_form.addRow("", self.voice_hide_unsuitable_check)
+
+        self.voice_show_recommended_badge_check = QCheckBox(
+            tr("settings.voice_prefs.show_badge")
+        )
+        self.voice_show_recommended_badge_check.setChecked(
+            self._voice_sort_prefs_loaded.show_recommended_badge
+        )
+        self.voice_show_recommended_badge_check.toggled.connect(
+            self._on_voice_sort_pref_changed
+        )
+        voice_prefs_form.addRow("", self.voice_show_recommended_badge_check)
+
+        self.voice_order_list = QListWidget()
+        self.voice_order_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.voice_order_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.voice_order_list.setMinimumHeight(180)
+        self.voice_order_list.model().rowsMoved.connect(self._on_custom_voice_order_changed)
+        voice_prefs_form.addRow(tr("settings.voice_prefs.custom_order"), self.voice_order_list)
+        voice_order_hint = self._hint_label(tr("settings.voice_prefs.custom_order_hint"))
+        voice_prefs_form.addRow("", voice_order_hint)
+
+        self._refresh_voice_order_list()
+        self._update_voice_region_pref_visibility()
+
+        tabs.addTab(
+            self._scroll_tab(voice_prefs_tab), tr("settings.tab.voice_prefs")
+        )
 
         data_tab = QWidget()
         data_layout = QVBoxLayout(data_tab)
@@ -1133,7 +1252,7 @@ class SettingsDialog(QDialog):
 
     @staticmethod
     def _wide_combo(combo: QComboBox) -> None:
-        combo.setMinimumWidth(280)
+        combo.setMinimumWidth(360)
         combo.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
@@ -1143,7 +1262,7 @@ class SettingsDialog(QDialog):
         label = QLabel(text)
         label.setObjectName("hintLabel")
         label.setWordWrap(True)
-        label.setMinimumWidth(320)
+        label.setMinimumWidth(420)
         return label
 
     def _add_color_picker(
@@ -1232,8 +1351,8 @@ class SettingsDialog(QDialog):
     def _fit_to_parent(self, parent) -> None:
         if parent is None:
             return
-        max_w = max(self.MIN_WIDTH, min(self.PREFERRED_WIDTH, int(parent.width() * 0.62)))
-        max_h = max(self.MIN_HEIGHT, min(self.PREFERRED_HEIGHT, int(parent.height() * 0.88)))
+        max_w = max(self.MIN_WIDTH, min(self.PREFERRED_WIDTH, int(parent.width() * 0.82)))
+        max_h = max(self.MIN_HEIGHT, min(self.PREFERRED_HEIGHT, int(parent.height() * 0.9)))
         self.resize(max_w, max_h)
         frame = self.frameGeometry()
         center = parent.frameGeometry().center()
@@ -1261,6 +1380,42 @@ class SettingsDialog(QDialog):
         if path:
             self.styletts2_model_edit.setText(path)
             self._on_tts_engine_changed()
+
+    def _refresh_speed_combo(self, *, apply_live: bool = False) -> None:
+        from ..core.tts_speed import (
+            allowed_ui_speech_rates,
+            clamp_ui_speech_rate_for_context,
+            speech_rate_limits_for_tts_context,
+        )
+
+        _lang, tts_mode, online_engine, offline_engine, _, _ = self._tts_context()
+        min_rate, max_rate = speech_rate_limits_for_tts_context(
+            tts_mode, offline_engine, online_engine
+        )
+        allowed = allowed_ui_speech_rates(min_rate, max_rate)
+        if not allowed:
+            allowed = allowed_ui_speech_rates(1.0, 1.0)
+
+        previous = float(
+            self.speed_combo.currentData()
+            or self.db.get_setting("tts_speed", "1.0")
+        )
+        target = clamp_ui_speech_rate_for_context(
+            previous, tts_mode, offline_engine, online_engine
+        )
+
+        self.speed_combo.blockSignals(True)
+        self.speed_combo.clear()
+        for speed in sorted(allowed.keys()):
+            self.speed_combo.addItem(f"{speed}x", speed)
+        for index in range(self.speed_combo.count()):
+            if self.speed_combo.itemData(index) == target:
+                self.speed_combo.setCurrentIndex(index)
+                break
+        self.speed_combo.blockSignals(False)
+
+        if target != previous or apply_live:
+            self._on_speech_speed_changed()
 
     def _tts_context(self) -> tuple[str, str, str, str, str, str]:
         lang_code = self.language_combo.currentData() or "en"
@@ -1293,6 +1448,112 @@ class SettingsDialog(QDialog):
             return self.murf_api_key_edit.text().strip()
         return self._stored_murf_api_key
 
+    def _voice_sort_prefs_from_ui(self) -> VoiceSortPrefs:
+        custom_order = dict(getattr(self, "_voice_sort_custom_order_draft", {}))
+        if hasattr(self, "voice_order_list") and self.voice_order_list.count():
+            lang_code, tts_mode, online_engine, offline_engine, _, _ = self._tts_context()
+            engine = active_tts_engine(tts_mode, offline_engine, online_engine)
+            order: list[str] = []
+            for i in range(self.voice_order_list.count()):
+                item = self.voice_order_list.item(i)
+                if item:
+                    voice_id = item.data(Qt.ItemDataRole.UserRole)
+                    if voice_id:
+                        order.append(str(voice_id))
+            if order:
+                custom_order[engine] = order
+        return VoiceSortPrefs(
+            preset=self.voice_sort_preset_combo.currentData() or PRESET_BOOK,
+            gender_pref=self.voice_gender_pref_combo.currentData() or GENDER_FEMALE,
+            region_pref=self.voice_region_pref_combo.currentData() or REGION_US,
+            hide_unsuitable=self.voice_hide_unsuitable_check.isChecked(),
+            show_recommended_badge=self.voice_show_recommended_badge_check.isChecked(),
+            custom_order=custom_order,
+        )
+
+    def _set_voice_sort_combo(self, combo: QComboBox, value: str) -> None:
+        for i in range(combo.count()):
+            if combo.itemData(i) == value:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(i)
+                combo.blockSignals(False)
+                return
+
+    def _on_voice_sort_preset_changed(self) -> None:
+        preset = self.voice_sort_preset_combo.currentData() or PRESET_BOOK
+        if preset == PRESET_BOOK:
+            self._set_voice_sort_combo(self.voice_gender_pref_combo, GENDER_FEMALE)
+            self._set_voice_sort_combo(self.voice_region_pref_combo, REGION_US)
+            self.voice_hide_unsuitable_check.setChecked(True)
+        elif preset == PRESET_NEWS:
+            self._set_voice_sort_combo(self.voice_gender_pref_combo, GENDER_MALE)
+            self.voice_hide_unsuitable_check.setChecked(True)
+        elif preset == PRESET_FAST:
+            self._set_voice_sort_combo(self.voice_gender_pref_combo, GENDER_MIX)
+            self._set_voice_sort_combo(self.voice_region_pref_combo, REGION_ANY)
+            self.voice_hide_unsuitable_check.setChecked(False)
+            self.voice_show_recommended_badge_check.setChecked(False)
+        self._on_voice_sort_pref_changed()
+
+    def _on_voice_sort_pref_changed(self) -> None:
+        self._update_voice_region_pref_visibility()
+        self._refresh_voice_order_list()
+        current_voice = self.voice_combo.currentData()
+        self._refresh_voices(current_voice)
+        if self.word_tts_profile_combo.currentData() == "same":
+            self._refresh_word_voices(current_voice)
+        else:
+            self._refresh_word_voices(self.word_voice_combo.currentData())
+
+    def _on_custom_voice_order_changed(self) -> None:
+        self._set_voice_sort_combo(self.voice_sort_preset_combo, PRESET_CUSTOM)
+        self._on_voice_sort_pref_changed()
+
+    def _update_voice_region_pref_visibility(self) -> None:
+        if not hasattr(self, "voice_region_pref_label"):
+            return
+        lang_code = self.language_combo.currentData() or "en"
+        visible = lang_code == "en"
+        self.voice_region_pref_label.setVisible(visible)
+        self.voice_region_pref_combo.setVisible(visible)
+
+    def _refresh_voice_order_list(self) -> None:
+        if not hasattr(self, "voice_order_list"):
+            return
+        (
+            lang_code,
+            tts_mode,
+            online_engine,
+            offline_engine,
+            piper_model_path,
+            styletts2_model_path,
+        ) = self._tts_context()
+        engine = active_tts_engine(tts_mode, offline_engine, online_engine)
+        prefs = self._voice_sort_prefs_from_ui()
+        ordered = get_voices_for_tts_context(
+            lang_code,
+            tts_mode,
+            offline_engine,
+            online_engine=online_engine,
+            app_dir=self.db.app_dir,
+            piper_model_path=piper_model_path,
+            styletts2_model_path=styletts2_model_path,
+            elevenlabs_api_key=self._elevenlabs_api_key_for_voices(),
+            cartesia_api_key=self._cartesia_api_key_for_voices(),
+            murf_api_key=self._murf_api_key_for_voices(),
+            voice_sort_prefs=prefs,
+        )
+        self.voice_order_list.blockSignals(True)
+        self.voice_order_list.clear()
+        for voice_id, label in ordered:
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, voice_id)
+            self.voice_order_list.addItem(item)
+        self.voice_order_list.blockSignals(False)
+        draft = dict(prefs.custom_order)
+        draft[engine] = [voice_id for voice_id, _ in ordered]
+        self._voice_sort_custom_order_draft = draft
+
     def _refresh_voices(self, select_voice: str | None = None) -> None:
         (
             lang_code,
@@ -1307,6 +1568,11 @@ class SettingsDialog(QDialog):
 
         self.voice_combo.blockSignals(True)
         self.voice_combo.clear()
+        voice_sort_prefs = (
+            self._voice_sort_prefs_from_ui()
+            if hasattr(self, "voice_sort_preset_combo")
+            else VoiceSortPrefs.from_settings(self.db.get_all_settings())
+        )
         voices = get_voices_for_tts_context(
             lang_code,
             tts_mode,
@@ -1318,6 +1584,7 @@ class SettingsDialog(QDialog):
             elevenlabs_api_key=self._elevenlabs_api_key_for_voices(),
             cartesia_api_key=self._cartesia_api_key_for_voices(),
             murf_api_key=self._murf_api_key_for_voices(),
+            voice_sort_prefs=voice_sort_prefs,
         )
         for voice_id, label in voices:
             self.voice_combo.addItem(label, voice_id)
@@ -1335,6 +1602,7 @@ class SettingsDialog(QDialog):
             elevenlabs_api_key=self._elevenlabs_api_key_for_voices(),
             cartesia_api_key=self._cartesia_api_key_for_voices(),
             murf_api_key=self._murf_api_key_for_voices(),
+            voice_sort_prefs=voice_sort_prefs,
         ):
             target = default_voice_for_tts_context(
                 lang_code,
@@ -1347,6 +1615,7 @@ class SettingsDialog(QDialog):
                 elevenlabs_api_key=self._elevenlabs_api_key_for_voices(),
             cartesia_api_key=self._cartesia_api_key_for_voices(),
             murf_api_key=self._murf_api_key_for_voices(),
+            voice_sort_prefs=voice_sort_prefs,
             )
 
         for i in range(self.voice_combo.count()):
@@ -1378,9 +1647,12 @@ class SettingsDialog(QDialog):
 
     def _on_tts_engine_changed(self) -> None:
         current_voice = self.voice_combo.currentData()
+        self._refresh_speed_combo()
         self._refresh_voices(current_voice)
         self._update_offline_engine_fields()
         self._update_offline_block_hint()
+        if hasattr(self, "voice_order_list"):
+            self._refresh_voice_order_list()
         if self.word_tts_profile_combo.currentData() == "same":
             self._refresh_word_voices(current_voice)
 
@@ -1460,6 +1732,11 @@ class SettingsDialog(QDialog):
 
         self.word_voice_combo.blockSignals(True)
         self.word_voice_combo.clear()
+        voice_sort_prefs = (
+            self._voice_sort_prefs_from_ui()
+            if hasattr(self, "voice_sort_preset_combo")
+            else VoiceSortPrefs.from_settings(self.db.get_all_settings())
+        )
         voices = get_voices_for_tts_context(
             lang_code,
             tts_mode,
@@ -1471,6 +1748,7 @@ class SettingsDialog(QDialog):
             elevenlabs_api_key=self._elevenlabs_api_key_for_voices(),
             cartesia_api_key=self._cartesia_api_key_for_voices(),
             murf_api_key=self._murf_api_key_for_voices(),
+            voice_sort_prefs=voice_sort_prefs,
         )
         for voice_id, label in voices:
             self.word_voice_combo.addItem(label, voice_id)
@@ -1488,6 +1766,7 @@ class SettingsDialog(QDialog):
             elevenlabs_api_key=self._elevenlabs_api_key_for_voices(),
             cartesia_api_key=self._cartesia_api_key_for_voices(),
             murf_api_key=self._murf_api_key_for_voices(),
+            voice_sort_prefs=voice_sort_prefs,
         ):
             target = default_voice_for_tts_context(
                 lang_code,
@@ -1500,6 +1779,7 @@ class SettingsDialog(QDialog):
                 elevenlabs_api_key=self._elevenlabs_api_key_for_voices(),
             cartesia_api_key=self._cartesia_api_key_for_voices(),
             murf_api_key=self._murf_api_key_for_voices(),
+            voice_sort_prefs=voice_sort_prefs,
             )
 
         for i in range(self.word_voice_combo.count()):
@@ -1545,15 +1825,24 @@ class SettingsDialog(QDialog):
         self._update_word_tts_fields()
 
     def _on_language_changed(self) -> None:
+        if hasattr(self, "voice_region_pref_label"):
+            self._update_voice_region_pref_visibility()
         current_voice = self.voice_combo.currentData()
         self._refresh_voices(current_voice)
         current_word_voice = self.word_voice_combo.currentData()
         self._refresh_word_voices(current_word_voice)
+        if hasattr(self, "voice_order_list"):
+            self._refresh_voice_order_list()
 
     def _on_speech_speed_changed(self) -> None:
+        speed = float(self.speed_combo.currentData() or 1.0)
+        self.db.set_setting("tts_speed", str(speed))
         self.preview_tts.stop(emit_finished=False)
         self.preview_tts.reset_memory_cache()
-        self.preview_tts.set_speed(float(self.speed_combo.currentData() or 1.0))
+        self.preview_tts.set_speed(speed)
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "apply_speech_rate"):
+            parent.apply_speech_rate(speed)
 
     def _apply_preview_engine_settings(self) -> None:
         self.preview_tts.stop(emit_finished=False)
@@ -1881,6 +2170,8 @@ class SettingsDialog(QDialog):
             "whisper_word_align", self.whisper_align_combo.currentData()
         )
         self.db.set_setting("sync_folder", self.sync_folder_edit.text().strip())
+        if hasattr(self, "voice_sort_preset_combo"):
+            self._voice_sort_prefs_from_ui().save_to_db(self.db)
         self._pending_api_key = self.api_key_edit.text().strip()
         self._pending_apify_api_token = self.apify_api_token_edit.text().strip()
         self._pending_google_api_key = self.google_api_key_edit.text().strip()

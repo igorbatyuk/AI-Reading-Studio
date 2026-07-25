@@ -1,235 +1,243 @@
 # AI Reading Studio
 
-Локальна програма для читання книг із синхронним озвученням (Windows / macOS / Linux).
+Local desktop app for reading books with synchronized text-to-speech (Windows / macOS / Linux).
 
-**Версія:** 1.2.0 · **Тести:** 279 passed · **55 test files**  
-**Повний аналіз проєкту:** [PROJECT_ANALYSIS.md](PROJECT_ANALYSIS.md) — архітектура, слабкі сторони, roadmap (у т.ч. майбутнє меню сортування голосів)
+**Version:** 1.2.0 · **Tests:** 319 passed · **61 test files**  
+**Docs:** [docs/USER_GUIDE.md](docs/USER_GUIDE.md) · [docs/PROJECT_ANALYSIS.md](docs/PROJECT_ANALYSIS.md)
 
 ---
 
-## Можливості
+## Features
 
-### Книги та читання
+### Books & reading
 
-- **Формати:** EPUB, TXT, PDF (OCR для сканів через Tesseract — Settings → Reading)
-- **Блоки:** 35–280 слів, jump до блоку, focus mode, ширина рядка до 3600 px
-- **Аудіо:** пауза, restart, −5 с, **швидкість відтворення** 1×–2× (лише прискорення; окремо від **швидкості мовлення** в Settings)
-- **Підсвітка слів:** gradient (за замовч.), karaoke, liquid, marker, aurora + палітри кольорів
-- **Whisper alignment** (опційно) — точні timestamps для offline Piper/Kokoro/XTTS (EN найкраще)
-- **Переклад блоку** · **клік по слову** (popup + ▶ вимова) · **виділення тексту**
-- **Статус обробки** — кнопка «Статус» у рядку стану: TTS engine, блок, кеш, переклад
+- **Formats:** EPUB, TXT, PDF (OCR for scans via Tesseract — Settings → Reading)
+- **Blocks:** 35–280 words, jump to block, focus mode, line width up to 3600 px
+- **Audio:** pause, restart, −5 s, **playback speed** 1×–2× (accelerate only; separate from **speech rate** in Settings)
+- **Word highlight:** gradient (default), karaoke, liquid, marker, aurora + color palettes
+- **Whisper alignment** (optional) — exact timestamps for offline Piper/Kokoro/XTTS (best for EN)
+- **Block translation** · **word click** (popup + ▶ pronunciation) · **text selection**
+- **Processing status** — Status button in the status bar: TTS engine, block, cache, translation, **generation queue** (cancel)
 
-### Озвучення (TTS)
+### Book audio (🎧)
 
-| Режим | Движки |
-|-------|--------|
+- Dedicated sidebar page: progress, block list, **generate all**, cancel
+- **Use saved audio when reading** — toggle without deleting files
+- Queue also visible in the **Status** panel
+
+### Text-to-speech (TTS)
+
+| Mode | Engines |
+|------|---------|
 | **Online** | Edge (free), Azure Speech, Google Cloud TTS, ElevenLabs, Cartesia, Murf |
 | **Offline** | System (pyttsx3), **Piper**, **Kokoro**, **XTTS v2**, **StyleTTS2** |
 | **Auto** | Edge → Azure → Google → ElevenLabs → Cartesia → Murf → offline |
 
-- Список голосів оновлюється при зміні движка / мови книги
-- **Окремий профіль TTS для слів** (напр. Edge для слів + ElevenLabs для блоків)
-- Preview voice у Settings → Audio
-- Кеш аудіо на диску — повторне відтворення миттєве
-- **Playback sync** — захист pause/play race (Kokoro), engine offsets для підсвітки
-- **Kokoro FIFO queue** — черга генерації замість глобального блокування
+- Voices **sorted for book reading**; **Female / Male** labels (localized in UI)
+- **Settings → Voice preferences:** preset (Audiobook / News / Fast / Custom), gender, EN region, hide unsuitable, drag-and-drop order per engine
+- **Speech rate** — combo shows only the **current engine’s** allowed range (Kokoro/Edge from 0.5×; Cartesia up to 1.5×)
+- **Separate word TTS profile** (e.g. Edge for words + ElevenLabs for blocks)
+- Preview voice in Settings → Audio
+- On-disk audio cache — instant replay
+- **Playback sync** — pause/play race protection (Kokoro), engine offsets for highlight
+- **Kokoro FIFO queue** — generation queue instead of global lock
 
-> **Голоси:** порядок у списку поки **не оптимізований** під читання книг (Piper — за датою файлу, Edge — порядок у коді). У [PROJECT_ANALYSIS.md §7](PROJECT_ANALYSIS.md#7-голоси-tts-поточний-стан-і-розвиток) — план **окремого меню Voice preferences** (пріоритети, статть, регіон, custom order).
+### Translation
 
-### Переклад
-
-Окремий движок для **блоку**, **кліку по слову**, **виділеного тексту**:
+Separate engine for **block**, **word click**, and **selection**:
 
 - **Apify**, **Google Cloud**, **DeepL**, **OpenAI**, **Bergamot**, **Ollama**, **free** (Google/Lingva/MyMemory)
 - **Auto chain:** OpenAI → Apify → Google → DeepL → Bergamot → Ollama → free
-- **Зрозумілі помилки** — Apify 402 (memory limit), квоти, мережа, Piper/Kokoro (`humanize_error`)
-- Лічильники використання з **кольоровими meters** (зелений / жовтий / червоний) — Settings → API
+- **Human-readable errors** — Apify 402 (memory limit), quotas, network, Piper/Kokoro (`humanize_error`)
+- Usage counters with **color meters** (green / yellow / red) — Settings → API
 
-| Сервіс | Орієнтовний ліміт (local counter) |
-|--------|-----------------------------------|
-| Apify translate | ~500k символів/міс. |
-| ElevenLabs TTS | ~10k credits/міс. |
-| Cartesia TTS | ~20k credits/міс. |
-| Murf TTS | ~100k символів trial |
-| Azure / Google TTS | local hard cap (~500k chars/міс. est.) |
+| Service | Approx. limit (local counter) |
+|---------|-------------------------------|
+| Apify translate | ~500k chars/month |
+| ElevenLabs TTS | ~10k credits/month |
+| Cartesia TTS | ~20k credits/month |
+| Murf TTS | ~100k chars trial |
+| Azure / Google TTS | local hard cap (~500k chars/month est.) |
 
-### Статистика та цілі
+### Statistics & goals
 
-- Блоки, слова, **час читання** (лічиться лише під час активного playback)
-- **Денна ціль:** блоки **або** час (5 хв … 8 год)
-- Календар, графіки 7 днів / 12 місяців / 5 років, експорт CSV
+- Blocks, words, **reading time** (active playback only)
+- **Daily goal:** blocks **or** time (5 min … 8 h)
+- Calendar, charts 7 days / 12 months / 5 years, CSV export
 
-### Інше
+### Other
 
-- **Бібліотека:** обкладинки, теги, пошук, re-import
-- **6 мов UI:** en, uk (повні), de, fr, es, pl (частково)
-- **Backup v4** + **очистка бібліотеки** (Settings → Data — без API ключів)
-- Світла / темна тема; ключі API в OS keyring
-- Settings → **Online** приховує offline-поля; **Offline** — online-поля
+- **Library:** covers, tags, search, re-import
+- **8 Settings tabs:** General, Reading, Highlight, Audio, **Voice preferences**, Translation, API, Data
+- **6 UI languages:** en, uk (full), de, fr, es, pl (partial)
+- **Backup v5** (voice sort prefs) + **clear library** (Settings → Data — API keys kept)
+- Light / dark theme; API keys in OS keyring
+- Settings → **Online** hides offline fields; **Offline** hides online fields
 
 ---
 
-## Встановлення
+## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Windows: подвійний клік `run.bat`
+Windows: double-click `run.bat`
 
-## Запуск
+## Run
 
 ```bash
 python main.py
 ```
 
-## Тести
+## Tests
 
 ```bash
 python -m pytest -q
 ```
 
-Діагностика offline TTS: `python scripts/check_tts.py`
+Offline TTS diagnostics: `python scripts/check_tts.py`
 
 ---
 
-## Швидкий старт
+## Quick start
 
-1. **Settings → General** — мова інтерфейсу, тема
-2. **Settings → Reading** — мова книги, розмір блоку, **тип денної цілі** (блоки / час), PDF OCR
-3. **Settings → Highlight** — стиль підсвітки; **Whisper word alignment** (Auto/On для offline EN)
-4. **Settings → Audio** — голос; **швидкість мовлення**; **швидкість відтворення** (1×–2× біля ▶); Auto / Online / Offline; **Word pronunciation**
-5. **Settings → Translation** — мова перекладу; движок для блоку / слова / виділення
-6. **Settings → API** — ключі; лічильники з кольоровими meters
-7. **+ Add Book** — імпорт (до 80 МБ)
-8. **▶ Start** — читання; **Статус** — фонова генерація аудіо
-9. **Statistics** — прогрес; **Settings → Data** — backup / restore / clear library
+1. **Settings → General** — UI language, theme
+2. **Settings → Reading** — book language, block size, **daily goal type** (blocks / time), PDF OCR
+3. **Settings → Highlight** — highlight style; **Whisper word alignment** (Auto/On for offline EN)
+4. **Settings → Audio** — voice; **speech rate** (range depends on engine); Auto / Online / Offline; **Word pronunciation**
+5. **Settings → Voice preferences** — sort preset, gender, EN region, custom order
+6. **Settings → Translation** — target language; engine for block / word / selection
+7. **Settings → API** — keys; usage meters
+8. **+ Add Book** — import (up to 80 MB)
+9. **▶ Start** — reading; **🎧 Book audio** — bulk generation; **Status** — background jobs
+10. **Statistics** — progress; **Settings → Data** — backup / restore / clear library
 
-### Рекомендації по мовах
+### Language recommendations
 
-Обирайте TTS під **мову книги** (Settings → Reading → Book language), не під мову інтерфейсу.
+Choose TTS for **book language** (Settings → Reading → Book language), not UI language.
 
-| Мова книги | Рекомендований TTS | Переклад | Примітка |
-|------------|-------------------|----------|----------|
-| **English** | **Edge** Jenny/Aria (online) або **Kokoro** `af_bella`, `af_sarah`, `af_heart` | free / DeepL | Whisper alignment — добре для EN offline |
-| **Українська** | **Edge/Azure Polina** або **Piper** (`uk_UA-ukrainian_tts-medium`) | free / DeepL / Bergamot | Kokoro **не** підтримує uk |
-| **Deutsch / Français / Español / Polski** | Edge / Azure / **Piper** `*-medium` | DeepL / free | |
-| **日本語 / 中文 / 한국어** | Edge / Azure / Google Cloud | DeepL / Google | Offline neural обмежено |
-| **Приватність / offline** | **Piper** або Kokoro (en) | **Bergamot** / **Ollama** | `tts/bergamot/setup.bat` |
-| **Максимальна якість** | ElevenLabs / Azure | DeepL | API keys + meters |
-| **Бюджет / без ключів** | **Edge** + free translate | free | Працює «з коробки» |
+| Book language | Recommended TTS | Translation | Notes |
+|---------------|-----------------|-------------|-------|
+| **English** | **Edge** Jenny/Aria (online) or **Kokoro** `af_bella`, `af_sarah`, `af_heart` | free / DeepL | Whisper alignment works well for EN offline |
+| **Ukrainian** | **Edge/Azure Polina** or **Piper** (`uk_UA-ukrainian_tts-medium`) | free / DeepL / Bergamot | Kokoro does **not** support uk |
+| **De / Fr / Es / Pl** | Edge / Azure / **Piper** `*-medium` | DeepL / free | |
+| **Ja / Zh / Ko** | Edge / Azure / Google Cloud | DeepL / Google | Offline neural limited |
+| **Privacy / offline** | **Piper** or Kokoro (en) | **Bergamot** / **Ollama** | `tts/bergamot/setup.bat` |
+| **Best quality** | ElevenLabs / Azure | DeepL | API keys + meters |
+| **Budget / no keys** | **Edge** + free translate | free | Works out of the box |
 
-**Два «speed» — це навмисно:**
+**Two “speed” controls — by design:**
 
-| Де | Що робить |
-|----|-----------|
-| **Settings → Audio → Швидкість мовлення** | Темп голосу **в аудіофайлі** (0.25×–2×). Потрібна **перегенерація** блоку. |
-| **Кнопка 1× / 1.25× / … біля ▶** | **Відтворення** готового файлу — лише прискорення (1×–2×), миттєво. |
+| Where | What it does |
+|-------|----------------|
+| **Settings → Audio → Speech rate** | Voice tempo **in the audio file**. Available values depend on the TTS engine. Requires **block regeneration**. |
+| **1× / 1.25× / … button near ▶** | **Playback** of cached audio — accelerate only (1×–2×), instant. |
 
 ---
 
-## Offline TTS — налаштування
+## Offline TTS setup
 
 ### Piper
 
 1. `tts/piper/setup.bat`
-2. Моделі `.onnx` → `tts/piper/` ([Hugging Face](https://huggingface.co/rhasspy/piper-voices/tree/main))
+2. `.onnx` models → `tts/piper/` ([Hugging Face](https://huggingface.co/rhasspy/piper-voices/tree/main))
 3. Settings → Audio → Offline → **Neural (Piper CLI)**
-4. Для книг краще `*-medium`, не `x_low`
+4. Prefer `*-medium` models for books, not `x_low`
 
 ### Kokoro
 
-Потребує **Python 3.11–3.12** (окремий worker):
+Requires **Python 3.11–3.12** (separate worker):
 
 ```
 AI Reading Studio  →  subprocess  →  tts/kokoro/kokoro_worker.py  →  audio.wav
 ```
 
 1. `tts/kokoro/setup.bat`
-2. Моделі в `tts/kokoro/models/`: `kokoro-v1.0.onnx`, `voices-v1.0.bin`
+2. Models in `tts/kokoro/models/`: `kokoro-v1.0.onnx`, `voices-v1.0.bin`
 3. Settings → Offline voice → **Neural (Kokoro CLI)**
-4. Рекомендовані en-голоси: `af_bella`, `af_sarah`, `af_heart`, `bf_emma`
+4. Recommended EN voices: `af_bella`, `af_sarah`, `af_heart`, `bf_emma`
 
-Генерація через **FIFO queue**; перший блок може зайняти 1–3 хв.
+Generation uses a **FIFO queue**; the first block may take 1–3 min. Minimum speech rate — **0.5×**.
 
 ### XTTS v2 / StyleTTS2
 
-Див. `tts/xtts/setup.bat`, `tts/styletts2/setup.bat` — reference `.wav` або `.pth` модель.
+See `tts/xtts/setup.bat`, `tts/styletts2/setup.bat` — reference `.wav` or `.pth` model.
 
-### Bergamot (offline переклад)
+### Bergamot (offline translation)
 
-Python **3.10** worker: `tts/bergamot/setup.bat` → модель `enuk` та ін.
+Python **3.10** worker: `tts/bergamot/setup.bat` → `enuk` model and others.
 
-### Whisper (точніша підсвітка offline)
+### Whisper (better offline highlight)
 
 1. `tts/whisper/setup.bat`
-2. Settings → Highlight → **Whisper word alignment** → Auto або On
-3. Найкраще для **English**; для uk Piper — обмежено
+2. Settings → Highlight → **Whisper word alignment** → Auto or On
+3. Best for **English**; limited for uk Piper
 
 ---
 
 ## Online TTS
 
-| Сервіс | Ключ | Settings |
-|--------|------|----------|
-| **Edge** | без ключа | Audio → Online → Edge |
-| **Azure Speech** | portal.azure.com | API → Audio |
-| **Google Cloud TTS** | console.cloud.google.com | API → Audio |
-| **ElevenLabs** | elevenlabs.io | API → Audio |
-| **Cartesia** | play.cartesia.ai/keys | API → Audio |
-| **Murf** | murf.ai | API → Audio |
+| Service | Key | Settings |
+|---------|-----|----------|
+| **Edge** | none | Audio → Online → Edge |
+| **Azure Speech** | portal.azure.com | API tab |
+| **Google Cloud TTS** | console.cloud.google.com | API tab |
+| **ElevenLabs** | elevenlabs.io | API tab |
+| **Cartesia** | play.cartesia.ai/keys | API tab |
+| **Murf** | murf.ai | API tab |
 
-**Prefetch блоків і слів** вимкнено для ElevenLabs, Cartesia, Murf — економія квоти.
+**Block and word prefetch** disabled for ElevenLabs, Cartesia, Murf — saves quota.
 
 ---
 
-## API для перекладу
+## Translation API
 
-| Сервіс | Де взяти ключ |
-|--------|---------------|
+| Service | Where to get a key |
+|---------|-------------------|
 | **Apify** | console.apify.com |
 | **Google Cloud** | console.cloud.google.com |
 | **DeepL** | deepl.com/pro-api |
 | **OpenAI** | platform.openai.com |
-| **Bergamot** | локально, `tts/bergamot/setup.bat` |
-| **Ollama** | локально, без ключа |
+| **Bergamot** | local, `tts/bergamot/setup.bat` |
+| **Ollama** | local, no key |
 
 ---
 
-## Дані
+## Data locations
 
-| Що | Де |
-|----|-----|
-| База | `%USERPROFILE%\.ai_reading_studio\reading_studio.db` |
-| Аудіо-кеш | `%USERPROFILE%\.ai_reading_studio\audio\` |
-| Лог | `%USERPROFILE%\.ai_reading_studio\app.log` |
+| What | Where |
+|------|-------|
+| Database | `%USERPROFILE%\.ai_reading_studio\reading_studio.db` |
+| Audio cache | `%USERPROFILE%\.ai_reading_studio\audio\` |
+| Log | `%USERPROFILE%\.ai_reading_studio\app.log` |
 
-**Clear library** видаляє книги, статистику, audio/covers; **налаштування та API keys зберігаються**.
+**Clear library** removes books, stats, audio/covers; **settings and API keys are kept**.
 
 ---
 
-## Структура проєкту
+## Project structure
 
 ```
-src/core/     БД, TTS (11 engines), переклад, highlight, whisper_align,
-              user_errors, stats, backup, secrets
-src/ui/       reading_view, highlight controller, library, stats,
+src/core/     DB, TTS (11 engines), voice ranking/prefs/gender, translation, highlight,
+              whisper_align, user_errors, stats, backup
+src/ui/       reading_view, book_audio_view, highlight controller, library, stats,
               settings, api_usage_meter, status panel
-tests/        279 тестів · 55 файлів
-tts/          Piper, Kokoro, XTTS, StyleTTS2, Bergamot, Whisper — окремі venv/workers
+tests/        319 tests · 61 files
+tts/          Piper, Kokoro, XTTS, StyleTTS2, Bergamot, Whisper — separate venv/workers
 scripts/      check_tts.py
-docs/         USER_GUIDE.md
+docs/         USER_GUIDE.md, PROJECT_ANALYSIS.md
 ```
 
 ---
 
-## Збірка
+## Build
 
 Windows: `build_exe.bat`
 
 ---
 
-## Документація
+## Documentation
 
-- [docs/USER_GUIDE.md](docs/USER_GUIDE.md) — користувацька інструкція
-- [PROJECT_ANALYSIS.md](PROJECT_ANALYSIS.md) — глибокий аналіз, слабкі сторони, roadmap (Voice preferences §7)
+- [docs/USER_GUIDE.md](docs/USER_GUIDE.md) — user guide
+- [docs/PROJECT_ANALYSIS.md](docs/PROJECT_ANALYSIS.md) — architecture, metrics, roadmap

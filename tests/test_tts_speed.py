@@ -39,7 +39,8 @@ def test_engine_speech_rate_stronger_slow_down():
 
 def test_kokoro_speech_rate_floor():
     assert kokoro_speech_rate(0.25) == 0.5
-    assert kokoro_speech_rate(0.6) == 0.6
+    assert kokoro_speech_rate(1.0) == 1.0
+    assert kokoro_speech_rate(0.8) < 0.8
 
 
 def test_piper_length_scale_increases_when_slower():
@@ -50,8 +51,29 @@ def test_piper_length_scale_increases_when_slower():
 
 
 def test_edge_rate_string_includes_new_slow_values():
-    assert edge_rate_string(0.25) == "-75%"
-    assert edge_rate_string(0.3) == "-70%"
+    assert edge_rate_string(0.25) == "-50%"
+    assert edge_rate_string(0.6) == "-40%"
+
+
+def test_edge_rate_string_clamps_slow_to_fifty_percent():
+    assert edge_rate_string(0.25) == "-50%"
+    assert edge_rate_string(0.5) == "-50%"
+    assert edge_rate_string(0.6) == "-40%"
+
+
+def test_google_speaking_rate_uses_ui_value():
+    from src.core.tts_speed import google_speaking_rate
+
+    assert google_speaking_rate(0.25) == 0.25
+    assert google_speaking_rate(1.0) == 1.0
+
+
+def test_elevenlabs_voice_speed_mapping():
+    from src.core.tts_speed import elevenlabs_voice_speed
+
+    assert elevenlabs_voice_speed(1.0) == 1.0
+    assert elevenlabs_voice_speed(0.25) == 0.25
+    assert elevenlabs_voice_speed(2.0) == 2.0
 
 
 def test_cartesia_generation_speed_mapping():

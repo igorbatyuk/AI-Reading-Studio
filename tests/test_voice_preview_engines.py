@@ -33,9 +33,11 @@ def _make_engine(tmp_path: Path):
     return tts
 
 
-def _write_fake(path: Path, suffix: str, engine: TTSEngine, text: str) -> Path:
+def _write_fake(
+    path: Path, suffix: str, engine: TTSEngine, text: str, *, for_word: bool = False
+) -> Path:
     key = engine._cache_key(text)
-    out = engine._cache_file_path(key, suffix)
+    out = engine._cache_file_path(key, suffix, for_word=for_word)
     out.write_bytes(b"audio")
     return out
 
@@ -93,34 +95,36 @@ def test_preview_generates_for_engine(
     tts.set_murf_api_key("murf-test-key")
 
     if generator == "_generate_offline":
-        def fake_offline(text, key, ctx):
-            return _write_fake(tmp_path, suffix, tts, text)
+        def fake_offline(text, key, ctx, *, for_word=False):
+            return _write_fake(tmp_path, suffix, tts, text, for_word=for_word)
 
         monkeypatch.setattr(tts, "_generate_offline", fake_offline)
         if tts_mode == "auto":
             monkeypatch.setattr(
                 tts,
                 "_generate_edge",
-                lambda t, k, c: (_ for _ in ()).throw(RuntimeError("edge down")),
+                lambda t, k, c, **kw: (_ for _ in ()).throw(RuntimeError("edge down")),
             )
             monkeypatch.setattr(
                 tts,
                 "_generate_azure",
-                lambda t, k, c: (_ for _ in ()).throw(RuntimeError("azure down")),
+                lambda t, k, c, **kw: (_ for _ in ()).throw(RuntimeError("azure down")),
             )
             monkeypatch.setattr(
                 tts,
                 "_generate_google",
-                lambda t, k, c: (_ for _ in ()).throw(RuntimeError("google down")),
+                lambda t, k, c, **kw: (_ for _ in ()).throw(RuntimeError("google down")),
             )
     else:
 
-        def fake_gen(text, key, ctx):
-            return _write_fake(tmp_path, suffix, tts, text)
+        def fake_gen(text, key, ctx, *, for_word=False):
+            return _write_fake(tmp_path, suffix, tts, text, for_word=for_word)
 
         monkeypatch.setattr(tts, generator, fake_gen)
 
-    path = tts._generate_audio(sample, tts._cache_key(sample), tts._main_context())
+    path = tts._generate_audio(
+        sample, tts._cache_key(sample), tts._main_context(), for_word=False
+    )
     assert path.exists()
     assert path.stat().st_size > 0
 

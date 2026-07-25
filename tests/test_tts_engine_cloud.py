@@ -20,9 +20,9 @@ def engine(tmp_path: Path) -> TTSEngine:
 def test_online_azure_uses_azure_generator(engine: TTSEngine, monkeypatch):
     called = {"azure": False}
 
-    def fake_azure(text, key, ctx):
+    def fake_azure(text, key, ctx, *, for_word=False):
         called["azure"] = True
-        path = engine._cache_file_path(key, ".mp3")
+        path = engine._cache_file_path(key, ".mp3", for_word=for_word)
         path.write_bytes(b"mp3")
         return path
 
@@ -37,12 +37,12 @@ def test_online_azure_uses_azure_generator(engine: TTSEngine, monkeypatch):
 
 
 def test_auto_falls_back_to_offline(engine: TTSEngine, monkeypatch):
-    monkeypatch.setattr(engine, "_generate_edge", lambda t, k, c: (_ for _ in ()).throw(RuntimeError("edge down")))
-    monkeypatch.setattr(engine, "_generate_azure", lambda t, k, c: (_ for _ in ()).throw(RuntimeError("azure down")))
-    monkeypatch.setattr(engine, "_generate_google", lambda t, k, c: (_ for _ in ()).throw(RuntimeError("google down")))
+    monkeypatch.setattr(engine, "_generate_edge", lambda t, k, c, **kw: (_ for _ in ()).throw(RuntimeError("edge down")))
+    monkeypatch.setattr(engine, "_generate_azure", lambda t, k, c, **kw: (_ for _ in ()).throw(RuntimeError("azure down")))
+    monkeypatch.setattr(engine, "_generate_google", lambda t, k, c, **kw: (_ for _ in ()).throw(RuntimeError("google down")))
 
-    def fake_offline(text, key, ctx):
-        path = engine._cache_file_path(key, ".wav")
+    def fake_offline(text, key, ctx, *, for_word=False):
+        path = engine._cache_file_path(key, ".wav", for_word=for_word)
         path.write_bytes(b"wav")
         return path
 
